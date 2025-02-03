@@ -96,12 +96,14 @@ async def generate(request: GenerateRequest):
             
             # Process frames and generate response
             with torch.no_grad():
-                # Prepare the full input with both text and processed frames
+                # Format the conversation prompt
+                prompt = f"USER: {request.instruction}\nASSISTANT:"
+                
+                # Process text and images together
                 inputs = processor(
-                    text=request.instruction,
+                    text=prompt,
                     images=processed_frames,
-                    return_tensors="pt",
-                    add_special_tokens=True
+                    return_tensors="pt"
                 ).to(device)
                 
                 # Generate response
@@ -113,13 +115,20 @@ async def generate(request: GenerateRequest):
                     do_sample=(request.temperature > 0)
                 )
                 response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+                
+                # Extract only the assistant's response
+                if "ASSISTANT:" in response:
+                    response = response.split("ASSISTANT:", 1)[1].strip()
         else:
             # Text-only generation
             with torch.no_grad():
+                # Format the conversation prompt
+                prompt = f"USER: {request.instruction}\nASSISTANT:"
+                
+                # Process text input
                 inputs = processor(
-                    text=request.instruction,
-                    return_tensors="pt",
-                    add_special_tokens=True
+                    text=prompt,
+                    return_tensors="pt"
                 ).to(device)
                 
                 outputs = model.generate(
@@ -130,6 +139,10 @@ async def generate(request: GenerateRequest):
                     do_sample=(request.temperature > 0)
                 )
                 response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+                
+                # Extract only the assistant's response
+                if "ASSISTANT:" in response:
+                    response = response.split("ASSISTANT:", 1)[1].strip()
         
         return {"response": response}
     
