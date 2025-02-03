@@ -8,8 +8,7 @@ import numpy as np
 from PIL import Image
 from typing import Optional
 import os
-from transformers import AutoProcessor, CLIPVisionModel, CLIPImageProcessor
-from transformers import AutoTokenizer, LlavaForConditionalGeneration
+from transformers import AutoProcessor, AutoTokenizer, LlavaForConditionalGeneration
 import tempfile
 
 app = FastAPI()
@@ -20,11 +19,10 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Initialize models and processors
 model = None
-tokenizer = None
 processor = None
 
 def load_model():
-    global model, tokenizer, processor
+    global model, processor
     if model is None:
         print("Loading Tarsier model and processors...")
         model = LlavaForConditionalGeneration.from_pretrained(
@@ -32,7 +30,6 @@ def load_model():
             torch_dtype=torch.float16,
             device_map="auto"  # This will automatically handle multi-GPU or single-GPU
         )
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
         processor = AutoProcessor.from_pretrained(MODEL_PATH)
         print("Models loaded successfully!")
 
@@ -40,7 +37,7 @@ class GenerateRequest(BaseModel):
     instruction: str
     video_url: Optional[str] = None
     max_new_tokens: Optional[int] = 512
-    temperature: Optional[float] = 0.7
+    temperature: Optional[float] = 0.0
     top_p: Optional[float] = 1.0
     
 def download_video(url: str) -> str:
@@ -57,32 +54,6 @@ def download_video(url: str) -> str:
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to download video: {str(e)}")
 
-def process_video(video_path: str):
-    try:
-        # Use decord to load video frames
-        video_reader = decord.VideoReader(video_path)
-        # Sample 8 frames evenly from the video
-        frame_indices = list(range(0, len(video_reader), len(video_reader)//8))[:8]
-        video_frames = video_reader.get_batch(frame_indices).asnumpy()
-        
-        # Convert frames to PIL images and normalize
-        pil_frames = []
-        for frame in video_frames:
-            # Ensure frame is in uint8 range [0, 255]
-            frame = np.clip(frame, 0, 255).astype(np.uint8)
-            pil_frames.append(Image.fromarray(frame))
-        
-        # Process all frames at once with dummy text
-        processed = processor(
-            images=pil_frames,
-            text="Analyze this image",  # Dummy text to satisfy the processor
-            return_tensors="pt"
-        )
-        
-        return processed.pixel_values.to(device)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing video: {str(e)}")
-
 @app.on_event("startup")
 async def startup_event():
     load_model()
@@ -91,75 +62,64 @@ async def startup_event():
 async def generate(request: GenerateRequest):
     try:
         if request.video_url:
-            # Download and process video
+            # Download video
             video_path = download_video(request.video_url)
             
-            # Use decord to load video frames
-            video_reader = decord.VideoReader(video_path)
-            frame_indices = list(range(0, len(video_reader), len(video_reader)//8))[:8]
-            video_frames = video_reader.get_batch(frame_indices).asnumpy()
+            # Format prompt with video token
+            prompt = f"<video>\n{request.instruction}"
+            
+            # Process input using the processor
+            inputs = processor(
+                prompt,
+                video_path,
+                edit_prompt=True,
+                return_tensors="pt"
+            )
             
             # Clean up temporary file
             os.unlink(video_path)
             
-            # Convert frames to PIL images and normalize
-            pil_frames = []
-            for frame in video_frames:
-                # Ensure frame is in uint8 range [0, 255]
-                frame = np.clip(frame, 0, 255).astype(np.uint8)
-                pil_frames.append(Image.fromarray(frame))
+            # Move inputs to device
+            inputs = {k: v.to(device) for k, v in inputs.items()}
             
-            # Process frames and generate response
+            # Generate response
             with torch.no_grad():
-                # Format the conversation prompt
-                prompt = f"USER: {request.instruction}\nASSISTANT:"
-                
-                # Process text and images together in one go
-                inputs = processor(
-                    text=prompt,
-                    images=pil_frames,
-                    return_tensors="pt"
-                ).to(device)
-                
-                # Generate response
                 outputs = model.generate(
                     **inputs,
-                    max_new_tokens=request.max_new_tokens,
+                    do_sample=(request.temperature > 0),
                     temperature=request.temperature,
+                    max_new_tokens=request.max_new_tokens,
                     top_p=request.top_p,
-                    do_sample=(request.temperature > 0)
+                    use_cache=True
                 )
-                response = tokenizer.decode(outputs[0], skip_special_tokens=True)
                 
-                # Extract only the assistant's response
-                if "ASSISTANT:" in response:
-                    response = response.split("ASSISTANT:", 1)[1].strip()
+                # Decode only the new tokens (skip the prompt)
+                response = processor.decode(
+                    outputs[0][inputs['input_ids'].shape[1]:],
+                    skip_special_tokens=True
+                )
         else:
             # Text-only generation
             with torch.no_grad():
-                # Format the conversation prompt
-                prompt = f"USER: {request.instruction}\nASSISTANT:"
-                
-                # Process text input
                 inputs = processor(
-                    text=prompt,
+                    text=request.instruction,
                     return_tensors="pt"
                 ).to(device)
                 
                 outputs = model.generate(
                     **inputs,
-                    max_new_tokens=request.max_new_tokens,
+                    do_sample=(request.temperature > 0),
                     temperature=request.temperature,
+                    max_new_tokens=request.max_new_tokens,
                     top_p=request.top_p,
-                    do_sample=(request.temperature > 0)
+                    use_cache=True
                 )
-                response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-                
-                # Extract only the assistant's response
-                if "ASSISTANT:" in response:
-                    response = response.split("ASSISTANT:", 1)[1].strip()
+                response = processor.decode(
+                    outputs[0][inputs['input_ids'].shape[1]:],
+                    skip_special_tokens=True
+                )
         
-        return {"response": response}
+        return {"response": response.strip()}
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
