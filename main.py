@@ -3,13 +3,10 @@ from pydantic import BaseModel
 import torch
 import requests
 import io
-import decord
-import numpy as np
-from PIL import Image
+import tempfile
 from typing import Optional
 import os
-from transformers import AutoProcessor, AutoTokenizer, LlavaForConditionalGeneration
-import tempfile
+from transformers import AutoProcessor, LlavaForConditionalGeneration
 
 app = FastAPI()
 
@@ -28,7 +25,7 @@ def load_model():
         model = LlavaForConditionalGeneration.from_pretrained(
             MODEL_PATH,
             torch_dtype=torch.float16,
-            device_map="auto"  # This will automatically handle multi-GPU or single-GPU
+            device_map="auto"
         )
         processor = AutoProcessor.from_pretrained(MODEL_PATH)
         print("Models loaded successfully!")
@@ -54,17 +51,6 @@ def download_video(url: str) -> str:
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to download video: {str(e)}")
 
-def process_video(video_path: str):
-    # Load video frames using decord
-    video_reader = decord.VideoReader(video_path)
-    # Sample 8 frames evenly from the video
-    frame_indices = list(range(0, len(video_reader), len(video_reader)//8))[:8]
-    video_frames = video_reader.get_batch(frame_indices).asnumpy()
-    
-    # Convert frames to PIL images
-    pil_frames = [Image.fromarray(frame) for frame in video_frames]
-    return pil_frames
-
 @app.on_event("startup")
 async def startup_event():
     load_model()
@@ -76,24 +62,15 @@ async def generate(request: GenerateRequest):
             # Download video
             video_path = download_video(request.video_url)
             
-            # Process video frames
-            pil_frames = process_video(video_path)
-            
-            # Clean up temporary file
-            os.unlink(video_path)
-            
             # Format prompt with video token
             prompt = f"<video>\n{request.instruction}"
             
-            # Process inputs separately
-            inputs = processor(
-                text=prompt,
-                images=pil_frames,
-                return_tensors="pt"
-            )
+            # Process using their method
+            inputs = processor(prompt, video_path, edit_prompt=True)
+            inputs = {k: v.to(device) for k, v in inputs.items() if v is not None}
             
-            # Move inputs to device
-            inputs = {k: v.to(device) for k, v in inputs.items()}
+            # Clean up temporary file
+            os.unlink(video_path)
             
             # Generate response
             with torch.no_grad():
@@ -107,8 +84,8 @@ async def generate(request: GenerateRequest):
                 )
                 
                 # Decode only the new tokens (skip the prompt)
-                response = processor.decode(
-                    outputs[0][inputs['input_ids'].shape[1]:],
+                response = processor.tokenizer.decode(
+                    outputs[0][inputs['input_ids'][0].shape[0]:],
                     skip_special_tokens=True
                 )
         else:
@@ -127,7 +104,7 @@ async def generate(request: GenerateRequest):
                     top_p=request.top_p,
                     use_cache=True
                 )
-                response = processor.decode(
+                response = processor.tokenizer.decode(
                     outputs[0][inputs['input_ids'].shape[1]:],
                     skip_special_tokens=True
                 )
