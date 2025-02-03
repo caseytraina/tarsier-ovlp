@@ -93,20 +93,31 @@ async def generate(request: GenerateRequest):
         if request.video_url:
             # Download and process video
             video_path = download_video(request.video_url)
-            processed_frames = process_video(video_path)
+            
+            # Use decord to load video frames
+            video_reader = decord.VideoReader(video_path)
+            frame_indices = list(range(0, len(video_reader), len(video_reader)//8))[:8]
+            video_frames = video_reader.get_batch(frame_indices).asnumpy()
             
             # Clean up temporary file
             os.unlink(video_path)
+            
+            # Convert frames to PIL images and normalize
+            pil_frames = []
+            for frame in video_frames:
+                # Ensure frame is in uint8 range [0, 255]
+                frame = np.clip(frame, 0, 255).astype(np.uint8)
+                pil_frames.append(Image.fromarray(frame))
             
             # Process frames and generate response
             with torch.no_grad():
                 # Format the conversation prompt
                 prompt = f"USER: {request.instruction}\nASSISTANT:"
                 
-                # Process text and images together
+                # Process text and images together in one go
                 inputs = processor(
                     text=prompt,
-                    images=processed_frames,
+                    images=pil_frames,
                     return_tensors="pt"
                 ).to(device)
                 
