@@ -1,6 +1,7 @@
 Pillow==9.3.0
 decord==0.6.0
-gradio==4.31.5
+fastapi==0.109.2
+uvicorn==0.27.1
 ninja==1.11.1.1
 omegaconf==2.3.0
 openai==1.14.2
@@ -19,4 +20,4 @@ torch==2.1.0
 torchvision==0.16.0
 torchaudio==2.1.0
 transformers==4.44.2
-triton==2.2.0
+triton==2.1.0
