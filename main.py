@@ -4,11 +4,13 @@ import torch
 import requests
 import io
 import tempfile
-from typing import Optional
+from typing import Optional, List
 import os
 from transformers import LlavaForConditionalGeneration
 from models.modeling_tarsier import TarsierForConditionalGeneration, LlavaConfig
 from dataset.processor import Processor
+from tools.conversation import Chat, conv_templates
+from copy import deepcopy
 
 app = FastAPI()
 
@@ -16,12 +18,13 @@ app = FastAPI()
 MODEL_PATH = os.getenv("MODEL_PATH", "omni-research/Tarsier-34b")  # Using the official Tarsier model
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Initialize models and processors
+# Initialize models, processor and chat
 model = None
 processor = None
+chat = None
 
 def load_model():
-    global model, processor
+    global model, processor, chat
     if model is None:
         print("Loading Tarsier model and processors...")
         model_config = LlavaConfig.from_pretrained(
@@ -37,7 +40,12 @@ def load_model():
         )
         model.eval()
         processor = Processor(MODEL_PATH, max_n_frames=8)
+        chat = Chat(model, processor, device=device)
         print("Models loaded successfully!")
+
+class Message(BaseModel):
+    role: str
+    content: str
 
 class GenerateRequest(BaseModel):
     instruction: str
@@ -45,6 +53,10 @@ class GenerateRequest(BaseModel):
     max_new_tokens: Optional[int] = 512
     temperature: Optional[float] = 0.0
     top_p: Optional[float] = 1.0
+    conversation_id: Optional[str] = None  # To track different conversations
+    
+# Store conversations
+conversations = {}
     
 def download_video(url: str) -> str:
     try:
@@ -67,60 +79,67 @@ async def startup_event():
 @app.post("/generate")
 async def generate(request: GenerateRequest):
     try:
-        if request.video_url:
-            # Download video
-            video_path = download_video(request.video_url)
-            
-            # Format prompt with video token
-            prompt = f"<video>\n{request.instruction}"
-            
-            # Process using their processor
-            inputs = processor(prompt, video_path, edit_prompt=True)
-            inputs = {k: v.to(device) for k, v in inputs.items() if v is not None}
-            
-            # Clean up temporary file
-            os.unlink(video_path)
-            
-            # Generate response
-            with torch.no_grad():
-                outputs = model.generate(
-                    **inputs,
-                    do_sample=(request.temperature > 0),
-                    temperature=request.temperature,
-                    max_new_tokens=request.max_new_tokens,
-                    top_p=request.top_p,
-                    use_cache=True
-                )
-                
-                # Decode only the new tokens (skip the prompt)
-                response = processor.tokenizer.decode(
-                    outputs[0][inputs['input_ids'][0].shape[0]:],
-                    skip_special_tokens=True
-                )
+        # Get or create conversation
+        if request.conversation_id and request.conversation_id in conversations:
+            conv = conversations[request.conversation_id]
+            video_path = conversations[f"{request.conversation_id}_video"]
         else:
-            # Text-only generation
-            with torch.no_grad():
-                inputs = processor(
-                    text=request.instruction,
-                    return_tensors="pt"
-                ).to(device)
-                
-                outputs = model.generate(
-                    **inputs,
-                    do_sample=(request.temperature > 0),
-                    temperature=request.temperature,
-                    max_new_tokens=request.max_new_tokens,
-                    top_p=request.top_p,
-                    use_cache=True
-                )
-                response = processor.tokenizer.decode(
-                    outputs[0][inputs['input_ids'].shape[1]:],
-                    skip_special_tokens=True
-                )
+            # Determine model type for conversation template
+            if '34b' in MODEL_PATH.lower():
+                conv_type = 'tarsier-34b'
+            elif '13b' in MODEL_PATH.lower():
+                conv_type = 'tarsier-13b'
+            elif '7b' in MODEL_PATH.lower():
+                conv_type = 'tarsier-7b'
+            else:
+                conv_type = 'tarsier-34b'  # default
+            
+            conv = deepcopy(conv_templates[conv_type])
+            
+            if request.video_url:
+                # Download and store video for the conversation
+                video_path = download_video(request.video_url)
+                if request.conversation_id:
+                    conversations[f"{request.conversation_id}_video"] = video_path
+            else:
+                video_path = None
+
+            if request.conversation_id:
+                conversations[request.conversation_id] = conv
+
+        # Add user message to conversation
+        chat.ask(request.instruction, conv)
         
-        return {"response": response.strip()}
+        # Generate response
+        response, conv, _ = chat.answer(
+            conv,
+            visual_data_file=video_path,
+            max_new_tokens=request.max_new_tokens,
+            temperature=request.temperature,
+            top_p=request.top_p
+        )
+        
+        # Update conversation if needed
+        if request.conversation_id:
+            conversations[request.conversation_id] = conv
+        
+        # Clean up video file if it's not part of a conversation
+        if not request.conversation_id and video_path:
+            os.unlink(video_path)
+        
+        return {
+            "response": response.strip(),
+            "conversation_id": request.conversation_id,
+            "messages": [{"role": role, "content": content} for role, content in conv.messages]
+        }
     
     except Exception as e:
+        # Clean up on error
+        if 'video_path' in locals() and not request.conversation_id:
+            try:
+                os.unlink(video_path)
+            except:
+                pass
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
