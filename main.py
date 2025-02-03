@@ -68,9 +68,10 @@ def process_video(video_path: str):
         # Convert frames to PIL images
         pil_frames = [Image.fromarray(frame) for frame in video_frames]
         
-        # Process all frames at once
+        # Process all frames at once with dummy text
         processed = processor(
             images=pil_frames,
+            text="Analyze this image",  # Dummy text to satisfy the processor
             return_tensors="pt"
         )
         
@@ -95,19 +96,13 @@ async def generate(request: GenerateRequest):
             
             # Process frames and generate response
             with torch.no_grad():
-                # Process the text input
-                text_tokens = tokenizer(
-                    request.instruction,
+                # Prepare the full input with both text and processed frames
+                inputs = processor(
+                    text=request.instruction,
+                    images=processed_frames,
                     return_tensors="pt",
                     add_special_tokens=True
                 ).to(device)
-                
-                # Prepare the full input
-                inputs = {
-                    "input_ids": text_tokens["input_ids"],
-                    "attention_mask": text_tokens["attention_mask"],
-                    "pixel_values": processed_frames  # Already has batch dimension
-                }
                 
                 # Generate response
                 outputs = model.generate(
@@ -121,8 +116,8 @@ async def generate(request: GenerateRequest):
         else:
             # Text-only generation
             with torch.no_grad():
-                inputs = tokenizer(
-                    request.instruction,
+                inputs = processor(
+                    text=request.instruction,
                     return_tensors="pt",
                     add_special_tokens=True
                 ).to(device)
