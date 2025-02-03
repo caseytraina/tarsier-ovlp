@@ -37,8 +37,11 @@ def load_model():
         print("Models loaded successfully!")
 
 class GenerateRequest(BaseModel):
+    instruction: str
     video_url: Optional[str] = None
-    text: str
+    max_new_tokens: Optional[int] = 512
+    temperature: Optional[float] = 0.7
+    top_p: Optional[float] = 1.0
     
 def download_video(url: str) -> str:
     try:
@@ -91,7 +94,7 @@ async def generate(request: GenerateRequest):
             # Process frames and generate response
             with torch.no_grad():
                 # Prepare input for the model
-                prompt = f"User: {request.text}\nAssistant:"
+                prompt = f"User: {request.instruction}\nAssistant:"
                 inputs = processor(text=prompt, return_tensors="pt").to(device)
                 
                 # Add the processed frames
@@ -100,18 +103,24 @@ async def generate(request: GenerateRequest):
                 # Generate response
                 outputs = model.generate(
                     **inputs,
-                    max_length=200,
-                    num_return_sequences=1,
-                    temperature=0.7,
-                    do_sample=True
+                    max_new_tokens=request.max_new_tokens,
+                    temperature=request.temperature,
+                    top_p=request.top_p,
+                    do_sample=(request.temperature > 0)
                 )
                 response = processor.decode(outputs[0], skip_special_tokens=True)
         else:
             # Text-only generation
             with torch.no_grad():
-                prompt = f"User: {request.text}\nAssistant:"
+                prompt = f"User: {request.instruction}\nAssistant:"
                 inputs = processor(text=prompt, return_tensors="pt").to(device)
-                outputs = model.generate(**inputs, max_length=200, temperature=0.7, do_sample=True)
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=request.max_new_tokens,
+                    temperature=request.temperature,
+                    top_p=request.top_p,
+                    do_sample=(request.temperature > 0)
+                )
                 response = processor.decode(outputs[0], skip_special_tokens=True)
         
         return {"response": response}
