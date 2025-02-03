@@ -6,7 +6,9 @@ import io
 import tempfile
 from typing import Optional
 import os
-from transformers import AutoProcessor, LlavaForConditionalGeneration
+from transformers import LlavaForConditionalGeneration
+from models.modeling_tarsier import TarsierForConditionalGeneration, LlavaConfig
+from dataset.processor import Processor
 
 app = FastAPI()
 
@@ -22,12 +24,19 @@ def load_model():
     global model, processor
     if model is None:
         print("Loading Tarsier model and processors...")
-        model = LlavaForConditionalGeneration.from_pretrained(
+        model_config = LlavaConfig.from_pretrained(
             MODEL_PATH,
-            torch_dtype=torch.float16,
-            device_map="auto"
+            trust_remote_code=True,
         )
-        processor = AutoProcessor.from_pretrained(MODEL_PATH)
+        model = TarsierForConditionalGeneration.from_pretrained(
+            MODEL_PATH,
+            config=model_config,
+            device_map="auto",
+            torch_dtype=torch.float16,
+            trust_remote_code=True
+        )
+        model.eval()
+        processor = Processor(MODEL_PATH, max_n_frames=8)
         print("Models loaded successfully!")
 
 class GenerateRequest(BaseModel):
@@ -65,7 +74,7 @@ async def generate(request: GenerateRequest):
             # Format prompt with video token
             prompt = f"<video>\n{request.instruction}"
             
-            # Process using their method
+            # Process using their processor
             inputs = processor(prompt, video_path, edit_prompt=True)
             inputs = {k: v.to(device) for k, v in inputs.items() if v is not None}
             
