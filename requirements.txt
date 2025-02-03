@@ -22,3 +22,5 @@ torchaudio==2.1.0
 transformers==4.44.2
 triton==2.1.0
 rich==13.5.0
+accelerate==0.21.0
+wheel==0.41.1

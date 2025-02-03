@@ -11,6 +11,8 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     git \
     ffmpeg \
+    build-essential \
+    python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
@@ -21,6 +23,9 @@ COPY requirements.txt .
 
 # Install Python dependencies
 RUN pip3 install --no-cache-dir -r requirements.txt
+
+# Install flash-attention separately with no build isolation
+RUN pip3 install flash-attn --no-build-isolation
 
 # Copy the rest of the application
 COPY . .
