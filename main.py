@@ -65,14 +65,9 @@ def process_video(video_path: str):
         frame_indices = list(range(0, len(video_reader), len(video_reader)//8))[:8]
         video_frames = video_reader.get_batch(frame_indices).asnumpy()
         
-        # Process frames using the model's processor
-        processed_frames = []
-        for frame in video_frames:
-            frame_pil = Image.fromarray(frame)
-            processed = processor(images=frame_pil, return_tensors="pt")
-            processed_frames.append(processed["pixel_values"].to(device))
-            
-        return torch.cat(processed_frames, dim=0)
+        # Convert frames to PIL images
+        pil_frames = [Image.fromarray(frame) for frame in video_frames]
+        return pil_frames
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing video: {str(e)}")
 
@@ -86,19 +81,20 @@ async def generate(request: GenerateRequest):
         if request.video_url:
             # Download and process video
             video_path = download_video(request.video_url)
-            frames = process_video(video_path)
+            pil_frames = process_video(video_path)
             
             # Clean up temporary file
             os.unlink(video_path)
             
             # Process frames and generate response
             with torch.no_grad():
-                # Prepare input for the model
-                prompt = f"User: {request.instruction}\nAssistant:"
-                inputs = processor(text=prompt, return_tensors="pt").to(device)
-                
-                # Add the processed frames
-                inputs["pixel_values"] = frames.unsqueeze(0)  # Add batch dimension
+                # Prepare input for the model with both text and images
+                inputs = processor(
+                    images=pil_frames,
+                    text=request.instruction,
+                    return_tensors="pt",
+                    padding=True
+                ).to(device)
                 
                 # Generate response
                 outputs = model.generate(
@@ -112,8 +108,11 @@ async def generate(request: GenerateRequest):
         else:
             # Text-only generation
             with torch.no_grad():
-                prompt = f"User: {request.instruction}\nAssistant:"
-                inputs = processor(text=prompt, return_tensors="pt").to(device)
+                inputs = processor(
+                    text=request.instruction,
+                    return_tensors="pt"
+                ).to(device)
+                
                 outputs = model.generate(
                     **inputs,
                     max_new_tokens=request.max_new_tokens,
