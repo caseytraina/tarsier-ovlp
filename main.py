@@ -65,9 +65,15 @@ def process_video(video_path: str):
         frame_indices = list(range(0, len(video_reader), len(video_reader)//8))[:8]
         video_frames = video_reader.get_batch(frame_indices).asnumpy()
         
-        # Convert frames to PIL images
-        pil_frames = [Image.fromarray(frame) for frame in video_frames]
-        return pil_frames
+        # Process each frame
+        processed_frames = []
+        for frame in video_frames:
+            frame_pil = Image.fromarray(frame)
+            processed = processor.image_processor(frame_pil, return_tensors="pt")["pixel_values"]
+            processed_frames.append(processed)
+            
+        # Stack all processed frames
+        return torch.cat(processed_frames, dim=0)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing video: {str(e)}")
 
@@ -81,20 +87,26 @@ async def generate(request: GenerateRequest):
         if request.video_url:
             # Download and process video
             video_path = download_video(request.video_url)
-            pil_frames = process_video(video_path)
+            processed_frames = process_video(video_path)
             
             # Clean up temporary file
             os.unlink(video_path)
             
             # Process frames and generate response
             with torch.no_grad():
-                # Prepare input for the model with both text and images
-                inputs = processor(
-                    images=pil_frames,
-                    text=request.instruction,
+                # Process the text input
+                text_tokens = tokenizer(
+                    request.instruction,
                     return_tensors="pt",
-                    padding=True
+                    add_special_tokens=True
                 ).to(device)
+                
+                # Prepare the full input
+                inputs = {
+                    "input_ids": text_tokens["input_ids"],
+                    "attention_mask": text_tokens["attention_mask"],
+                    "pixel_values": processed_frames.unsqueeze(0).to(device)  # Add batch dimension
+                }
                 
                 # Generate response
                 outputs = model.generate(
@@ -104,13 +116,14 @@ async def generate(request: GenerateRequest):
                     top_p=request.top_p,
                     do_sample=(request.temperature > 0)
                 )
-                response = processor.decode(outputs[0], skip_special_tokens=True)
+                response = tokenizer.decode(outputs[0], skip_special_tokens=True)
         else:
             # Text-only generation
             with torch.no_grad():
-                inputs = processor(
-                    text=request.instruction,
-                    return_tensors="pt"
+                inputs = tokenizer(
+                    request.instruction,
+                    return_tensors="pt",
+                    add_special_tokens=True
                 ).to(device)
                 
                 outputs = model.generate(
@@ -120,7 +133,7 @@ async def generate(request: GenerateRequest):
                     top_p=request.top_p,
                     do_sample=(request.temperature > 0)
                 )
-                response = processor.decode(outputs[0], skip_special_tokens=True)
+                response = tokenizer.decode(outputs[0], skip_special_tokens=True)
         
         return {"response": response}
     
