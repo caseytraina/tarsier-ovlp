@@ -65,8 +65,12 @@ def process_video(video_path: str):
         frame_indices = list(range(0, len(video_reader), len(video_reader)//8))[:8]
         video_frames = video_reader.get_batch(frame_indices).asnumpy()
         
-        # Convert frames to PIL images
-        pil_frames = [Image.fromarray(frame) for frame in video_frames]
+        # Convert frames to PIL images and normalize
+        pil_frames = []
+        for frame in video_frames:
+            # Ensure frame is in uint8 range [0, 255]
+            frame = np.clip(frame, 0, 255).astype(np.uint8)
+            pil_frames.append(Image.fromarray(frame))
         
         # Process all frames at once with dummy text
         processed = processor(
