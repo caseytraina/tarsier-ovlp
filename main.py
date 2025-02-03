@@ -8,7 +8,8 @@ import numpy as np
 from PIL import Image
 from typing import Optional
 import os
-from transformers import AutoModelForCausalLM, AutoTokenizer, CLIPVisionModel, CLIPImageProcessor
+from transformers import AutoProcessor, CLIPVisionModel, CLIPImageProcessor
+from transformers import AutoTokenizer, LlavaForConditionalGeneration
 import tempfile
 
 app = FastAPI()
@@ -20,17 +21,19 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 # Initialize models and processors
 model = None
 tokenizer = None
-vision_model = None
-image_processor = None
+processor = None
 
 def load_model():
-    global model, tokenizer, vision_model, image_processor
+    global model, tokenizer, processor
     if model is None:
         print("Loading Tarsier model and processors...")
-        model = AutoModelForCausalLM.from_pretrained(MODEL_PATH, torch_dtype=torch.float16).to(device)
+        model = LlavaForConditionalGeneration.from_pretrained(
+            MODEL_PATH,
+            torch_dtype=torch.float16,
+            device_map="auto"  # This will automatically handle multi-GPU or single-GPU
+        )
         tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-        vision_model = CLIPVisionModel.from_pretrained("openai/clip-vit-large-patch14").to(device)
-        image_processor = CLIPImageProcessor.from_pretrained("openai/clip-vit-large-patch14")
+        processor = AutoProcessor.from_pretrained(MODEL_PATH)
         print("Models loaded successfully!")
 
 class GenerateRequest(BaseModel):
@@ -59,11 +62,11 @@ def process_video(video_path: str):
         frame_indices = list(range(0, len(video_reader), len(video_reader)//8))[:8]
         video_frames = video_reader.get_batch(frame_indices).asnumpy()
         
-        # Process frames using CLIP image processor
+        # Process frames using the model's processor
         processed_frames = []
         for frame in video_frames:
             frame_pil = Image.fromarray(frame)
-            processed = image_processor(images=frame_pil, return_tensors="pt")
+            processed = processor(images=frame_pil, return_tensors="pt")
             processed_frames.append(processed["pixel_values"].to(device))
             
         return torch.cat(processed_frames, dim=0)
@@ -85,31 +88,31 @@ async def generate(request: GenerateRequest):
             # Clean up temporary file
             os.unlink(video_path)
             
-            # Process frames through vision model
+            # Process frames and generate response
             with torch.no_grad():
-                vision_features = vision_model(frames).last_hidden_state
-                
                 # Prepare input for the model
                 prompt = f"User: {request.text}\nAssistant:"
-                inputs = tokenizer(prompt, return_tensors="pt").to(device)
+                inputs = processor(text=prompt, return_tensors="pt").to(device)
+                
+                # Add the processed frames
+                inputs["pixel_values"] = frames.unsqueeze(0)  # Add batch dimension
                 
                 # Generate response
                 outputs = model.generate(
-                    input_ids=inputs["input_ids"],
-                    vision_hidden_states=vision_features,
+                    **inputs,
                     max_length=200,
                     num_return_sequences=1,
                     temperature=0.7,
                     do_sample=True
                 )
-                response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+                response = processor.decode(outputs[0], skip_special_tokens=True)
         else:
             # Text-only generation
             with torch.no_grad():
                 prompt = f"User: {request.text}\nAssistant:"
-                inputs = tokenizer(prompt, return_tensors="pt").to(device)
+                inputs = processor(text=prompt, return_tensors="pt").to(device)
                 outputs = model.generate(**inputs, max_length=200, temperature=0.7, do_sample=True)
-                response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+                response = processor.decode(outputs[0], skip_special_tokens=True)
         
         return {"response": response}
     
