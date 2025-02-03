@@ -1,3 +1,8 @@
+import os
+# Set cache directory before importing transformers
+os.environ['TRANSFORMERS_CACHE'] = '/home/caseytraina582/model_cache'
+os.environ['HF_HOME'] = '/home/caseytraina582/model_cache'
+
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import torch
@@ -5,7 +10,6 @@ import requests
 import io
 import tempfile
 from typing import Optional
-import os
 import threading
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -13,6 +17,13 @@ from transformers import LlavaForConditionalGeneration
 from models.modeling_tarsier import TarsierForConditionalGeneration, LlavaConfig
 from dataset.processor import Processor
 from contextlib import contextmanager
+from huggingface_hub import HfApi, configure_http_backend
+from huggingface_hub.constants import DEFAULT_ETAG_TIMEOUT
+
+# Configure hub for parallel downloads
+configure_http_backend(backend_type="aiohttp")
+os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = "1"
+os.environ['HF_HUB_DOWNLOAD_WORKERS'] = "8"  # Number of parallel downloads
 
 app = FastAPI()
 
