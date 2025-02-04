@@ -2,7 +2,8 @@ import os
 # Set cache directory before importing transformers
 os.environ['HF_HOME'] = '/mnt/models/tarsier'  # This is the new recommended way
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import torch
 import requests
@@ -22,7 +23,10 @@ from huggingface_hub import HfApi
 
 # Configure logging
 import logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Configure parallel downloads
@@ -105,9 +109,30 @@ class GenerateRequest(BaseModel):
     temperature: Optional[float] = 0.0
     top_p: Optional[float] = 1.0
 
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    logger.info(f"Request path: {request.url.path}")
+    logger.info(f"Request method: {request.method}")
+    try:
+        body = await request.json()
+        logger.info(f"Request body: {body}")
+    except:
+        pass
+    response = await call_next(request)
+    return response
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 async def download_video(url: str, temp_file: str):
     """Download video to a specific temporary file"""
-    print(f"Starting video download from {url}")
+    logger.info(f"Starting video download from {url}")
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as response:
@@ -120,25 +145,25 @@ async def download_video(url: str, temp_file: str):
                             break
                         f.write(chunk)
                         total_size += len(chunk)
-                print(f"Video downloaded successfully: {total_size} bytes")
+                logger.info(f"Video downloaded successfully: {total_size} bytes")
     except Exception as e:
-        print(f"Error downloading video: {str(e)}")
+        logger.error(f"Error downloading video: {str(e)}", exc_info=True)
         raise HTTPException(status_code=400, detail=f"Failed to download video: {str(e)}")
 
 def process_video(prompt: str, video_path: str, request: GenerateRequest):
     """Process video and generate response - CPU/GPU bound operations"""
     try:
-        print(f"Processing video from {video_path} with prompt: {prompt}")
+        logger.info(f"Processing video from {video_path} with prompt: {prompt}")
         with model_lock:  # Ensure exclusive model access
-            print("Processing video with model...")
+            logger.info("Processing video with model...")
             inputs = processor(prompt, video_path, edit_prompt=True)
-            print("Video processed by processor")
+            logger.info("Video processed by processor")
             
             inputs = {k: v.to(device) for k, v in inputs.items() if v is not None}
-            print("Inputs moved to device")
+            logger.info("Inputs moved to device")
             
             with torch.no_grad():
-                print("Generating response...")
+                logger.info("Generating response...")
                 outputs = model.generate(
                     **inputs,
                     do_sample=(request.temperature > 0),
@@ -147,17 +172,17 @@ def process_video(prompt: str, video_path: str, request: GenerateRequest):
                     top_p=request.top_p,
                     use_cache=True
                 )
-                print("Response generated")
+                logger.info("Response generated")
                 
                 response = processor.tokenizer.decode(
                     outputs[0][inputs['input_ids'][0].shape[0]:],
                     skip_special_tokens=True
                 )
-                print("Response decoded")
+                logger.info("Response decoded")
         
         return response
     except Exception as e:
-        print(f"Error processing video: {str(e)}")
+        logger.error(f"Error processing video: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error processing video: {str(e)}")
 
 def process_text(request: GenerateRequest):
