@@ -247,8 +247,9 @@ def process_text(request: GenerateRequest):
     """Process text-only request"""
     with model_lock:  # Ensure exclusive model access
         with torch.no_grad():
+            # Pass the instruction directly without 'text' keyword
             inputs = processor(
-                text=request.instruction,
+                request.instruction,
                 return_tensors="pt"
             ).to(device)
             
