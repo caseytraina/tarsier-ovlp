@@ -6,6 +6,9 @@ ENV MODEL_PATH="omni-research/Tarsier-34b"
 ENV MAX_N_FRAMES=8
 ENV HF_HOME=/mnt/models/tarsier
 ENV TORCH_HOME=/mnt/models/tarsier
+ENV HF_HUB_ENABLE_HF_TRANSFER=1
+ENV HF_HUB_DOWNLOAD_WORKERS=8
+ENV PYTHONUNBUFFERED=1
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \

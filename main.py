@@ -15,11 +15,11 @@ from concurrent.futures import ThreadPoolExecutor
 from transformers import LlavaForConditionalGeneration
 from models.modeling_tarsier import TarsierForConditionalGeneration, LlavaConfig
 from dataset.processor import Processor
-from contextlib import contextmanager
-from huggingface_hub import configure_http_backend
+from contextlib import contextmanager, asynccontextmanager
+from huggingface_hub import set_http_backend
 
 # Configure hub for parallel downloads
-configure_http_backend("aiohttp")  # Updated to use correct API
+set_http_backend("aiohttp")
 os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = "1"
 os.environ['HF_HUB_DOWNLOAD_WORKERS'] = "8"  # Number of parallel downloads
 
@@ -32,9 +32,23 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 # Initialize models and processors
 model = None
 processor = None
-model_lock = threading.Lock()  # Lock for model access
-request_semaphore = asyncio.Semaphore(3)  # Limit concurrent requests to 3
-executor = ThreadPoolExecutor(max_workers=3)  # Thread pool for CPU-bound tasks
+model_lock = threading.Lock()
+request_semaphore = asyncio.Semaphore(3)
+executor = ThreadPoolExecutor(max_workers=3)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    print("Loading model on startup...")
+    load_model()
+    yield
+    # Shutdown
+    print("Cleaning up on shutdown...")
+    global model, processor
+    model = None
+    processor = None
+
+app = FastAPI(lifespan=lifespan)
 
 @contextmanager
 def temporary_video_file():
@@ -138,10 +152,6 @@ def process_text(request: GenerateRequest):
             )
     
     return response
-
-@app.on_event("startup")
-async def startup_event():
-    load_model()
 
 @app.post("/generate")
 async def generate(request: GenerateRequest, background_tasks: BackgroundTasks):
