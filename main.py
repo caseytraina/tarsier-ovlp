@@ -76,17 +76,21 @@ def load_model():
             MODEL_PATH,
             trust_remote_code=True,
         )
+        # Set explicit dtype for Flash Attention 2.0
+        dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
+        
         model = TarsierForConditionalGeneration.from_pretrained(
             MODEL_PATH,
             config=model_config,
             device_map="auto",
             max_memory=max_memory,
-            torch_dtype=torch.float16,
+            torch_dtype=dtype,
+            use_flash_attention_2=True,  # Explicitly enable Flash Attention 2.0
             trust_remote_code=True
         )
         model.eval()
         processor = Processor(MODEL_PATH, max_n_frames=8)
-        print("Models loaded successfully!")
+        print(f"Models loaded successfully with dtype: {dtype}")
 
 class GenerateRequest(BaseModel):
     instruction: str
@@ -97,41 +101,58 @@ class GenerateRequest(BaseModel):
 
 async def download_video(url: str, temp_file: str):
     """Download video to a specific temporary file"""
+    print(f"Starting video download from {url}")
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as response:
                 response.raise_for_status()
                 with open(temp_file, 'wb') as f:
+                    total_size = 0
                     while True:
                         chunk = await response.content.read(8192)
                         if not chunk:
                             break
                         f.write(chunk)
+                        total_size += len(chunk)
+                print(f"Video downloaded successfully: {total_size} bytes")
     except Exception as e:
+        print(f"Error downloading video: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Failed to download video: {str(e)}")
 
 def process_video(prompt: str, video_path: str, request: GenerateRequest):
     """Process video and generate response - CPU/GPU bound operations"""
-    with model_lock:  # Ensure exclusive model access
-        inputs = processor(prompt, video_path, edit_prompt=True)
-        inputs = {k: v.to(device) for k, v in inputs.items() if v is not None}
-        
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                do_sample=(request.temperature > 0),
-                temperature=request.temperature,
-                max_new_tokens=request.max_new_tokens,
-                top_p=request.top_p,
-                use_cache=True
-            )
+    try:
+        print(f"Processing video from {video_path} with prompt: {prompt}")
+        with model_lock:  # Ensure exclusive model access
+            print("Processing video with model...")
+            inputs = processor(prompt, video_path, edit_prompt=True)
+            print("Video processed by processor")
             
-            response = processor.tokenizer.decode(
-                outputs[0][inputs['input_ids'][0].shape[0]:],
-                skip_special_tokens=True
-            )
-    
-    return response
+            inputs = {k: v.to(device) for k, v in inputs.items() if v is not None}
+            print("Inputs moved to device")
+            
+            with torch.no_grad():
+                print("Generating response...")
+                outputs = model.generate(
+                    **inputs,
+                    do_sample=(request.temperature > 0),
+                    temperature=request.temperature,
+                    max_new_tokens=request.max_new_tokens,
+                    top_p=request.top_p,
+                    use_cache=True
+                )
+                print("Response generated")
+                
+                response = processor.tokenizer.decode(
+                    outputs[0][inputs['input_ids'][0].shape[0]:],
+                    skip_special_tokens=True
+                )
+                print("Response decoded")
+        
+        return response
+    except Exception as e:
+        print(f"Error processing video: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing video: {str(e)}")
 
 def process_text(request: GenerateRequest):
     """Process text-only request"""
@@ -162,6 +183,7 @@ async def generate(request: GenerateRequest, background_tasks: BackgroundTasks):
     async with request_semaphore:  # Limit concurrent requests
         try:
             if request.video_url:
+                print(f"Received video request: {request.video_url}")
                 # Use context manager for video file handling
                 with temporary_video_file() as video_path:
                     # Download video
@@ -169,6 +191,7 @@ async def generate(request: GenerateRequest, background_tasks: BackgroundTasks):
                     
                     # Format prompt with video token
                     prompt = f"<video>\n{request.instruction}"
+                    print(f"Processing with prompt: {prompt}")
                     
                     # Process video in thread pool
                     response = await asyncio.get_event_loop().run_in_executor(
@@ -178,20 +201,24 @@ async def generate(request: GenerateRequest, background_tasks: BackgroundTasks):
                         video_path,
                         request
                     )
+                    print("Video processing completed")
             else:
+                print("Received text-only request")
                 # Process text-only request in thread pool
                 response = await asyncio.get_event_loop().run_in_executor(
                     executor,
                     process_text,
                     request
                 )
+                print("Text processing completed")
             
             return {"response": response.strip()}
         
         except Exception as e:
+            print(f"Error in generate endpoint: {str(e)}")
             raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
     import aiohttp
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info") 

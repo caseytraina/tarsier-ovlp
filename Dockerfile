@@ -33,8 +33,8 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# Install flash-attention separately with no build isolation
-RUN pip3 install flash-attn --no-build-isolation
+# Install specific version of flash-attention
+RUN pip install flash-attn==2.3.6 --no-build-isolation
 
 # Copy the rest of the application
 COPY . .
