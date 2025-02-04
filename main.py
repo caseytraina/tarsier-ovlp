@@ -280,14 +280,25 @@ async def generate(request: GenerateRequest, background_tasks: BackgroundTasks):
             logger.error(f"Error in generate endpoint: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
-# Add Vertex AI health check endpoints
+# Add Vertex AI health check endpoint
 @app.get("/v1/endpoints/{endpoint_id}/deployedModels/{deployed_model_id}")
 async def health_check(endpoint_id: str, deployed_model_id: str):
-    return {
-        "endpoint_id": endpoint_id,
-        "deployed_model_id": deployed_model_id,
-        "state": "AVAILABLE"
-    }
+    """Health check endpoint for Vertex AI"""
+    logger.info(f"Health check request received for endpoint_id: {endpoint_id}, deployed_model_id: {deployed_model_id}")
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=200,
+        content={
+            "state": "AVAILABLE",
+            "deployment_state": "DEPLOYED"
+        }
+    )
+
+# Add AIP-Health endpoint
+@app.get("/health")
+async def health():
+    """Basic health check endpoint"""
+    return {"status": "healthy"}
 
 # Add Vertex AI prediction endpoint
 @app.post("/v1/endpoints/{endpoint_id}/deployedModels/{deployed_model_id}:predict")
@@ -344,4 +355,4 @@ async def vertex_predict(endpoint_id: str, deployed_model_id: str, request: Requ
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info") 
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
