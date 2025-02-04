@@ -11,6 +11,7 @@ import tempfile
 from typing import Optional
 import threading
 import asyncio
+import aiohttp
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
 from transformers import LlavaForConditionalGeneration
@@ -18,6 +19,11 @@ from models.modeling_tarsier import TarsierForConditionalGeneration, LlavaConfig
 from dataset.processor import Processor
 from contextlib import contextmanager, asynccontextmanager
 from huggingface_hub import HfApi
+
+# Configure logging
+import logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Configure parallel downloads
 os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = "1"
@@ -180,10 +186,11 @@ def process_text(request: GenerateRequest):
 
 @app.post("/generate")
 async def generate(request: GenerateRequest, background_tasks: BackgroundTasks):
+    logger.info(f"Received request: {request}")
     async with request_semaphore:  # Limit concurrent requests
         try:
             if request.video_url:
-                print(f"Received video request: {request.video_url}")
+                logger.info(f"Processing video request: {request.video_url}")
                 # Use context manager for video file handling
                 with temporary_video_file() as video_path:
                     # Download video
@@ -191,7 +198,7 @@ async def generate(request: GenerateRequest, background_tasks: BackgroundTasks):
                     
                     # Format prompt with video token
                     prompt = f"<video>\n{request.instruction}"
-                    print(f"Processing with prompt: {prompt}")
+                    logger.info(f"Processing with prompt: {prompt}")
                     
                     # Process video in thread pool
                     response = await asyncio.get_event_loop().run_in_executor(
@@ -201,24 +208,23 @@ async def generate(request: GenerateRequest, background_tasks: BackgroundTasks):
                         video_path,
                         request
                     )
-                    print("Video processing completed")
+                    logger.info("Video processing completed")
             else:
-                print("Received text-only request")
+                logger.info("Processing text-only request")
                 # Process text-only request in thread pool
                 response = await asyncio.get_event_loop().run_in_executor(
                     executor,
                     process_text,
                     request
                 )
-                print("Text processing completed")
+                logger.info("Text processing completed")
             
             return {"response": response.strip()}
         
         except Exception as e:
-            print(f"Error in generate endpoint: {str(e)}")
+            logger.error(f"Error in generate endpoint: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
-    import aiohttp
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info") 
