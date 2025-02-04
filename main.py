@@ -11,15 +11,19 @@ import tempfile
 from typing import Optional
 import threading
 import asyncio
+import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
 from transformers import LlavaForConditionalGeneration
 from models.modeling_tarsier import TarsierForConditionalGeneration, LlavaConfig
 from dataset.processor import Processor
 from contextlib import contextmanager, asynccontextmanager
+from huggingface_hub.constants import DEFAULT_DOWNLOAD_CHUNK_SIZE
 
 # Configure parallel downloads via environment variables
 os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = "1"
-os.environ['HF_HUB_DOWNLOAD_WORKERS'] = "8"  # Number of parallel downloads
+num_workers = max(1, multiprocessing.cpu_count() // 2)  # Half of CPU cores
+os.environ['HF_HUB_DOWNLOAD_WORKERS'] = str(num_workers)
+os.environ['HF_HUB_DOWNLOAD_CHUNK_SIZE'] = str(DEFAULT_DOWNLOAD_CHUNK_SIZE)
 
 app = FastAPI()
 
