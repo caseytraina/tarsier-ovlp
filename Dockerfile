@@ -12,6 +12,8 @@ ENV PYTHONUNBUFFERED=1
 ENV CUDA_HOME=/usr/local/cuda
 ENV PATH=${CUDA_HOME}/bin:${PATH}
 ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+ENV AIP_HTTP_PORT=8000
+ENV AIP_HEALTH_ROUTE=/health
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -51,7 +53,8 @@ RUN mkdir -p /mnt/models/tarsier && \
 COPY . .
 
 # Expose the port the app runs on
-EXPOSE 8000
+EXPOSE ${AIP_HTTP_PORT}
 
-# Command to run the application
-CMD ["python3", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"] 
+# Use ENTRYPOINT to ensure the server runs in the foreground
+ENTRYPOINT ["python3", "-m", "uvicorn", "main:app", "--host", "0.0.0.0"]
+CMD ["--port", "8000"] 

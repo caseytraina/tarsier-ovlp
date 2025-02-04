@@ -4,6 +4,7 @@ os.environ['HF_HOME'] = '/mnt/models/tarsier'  # This is the new recommended way
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import torch
 import requests
@@ -300,24 +301,44 @@ async def generate(request: GenerateRequest, background_tasks: BackgroundTasks):
             logger.error(f"Error in generate endpoint: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
-# Add Vertex AI health check endpoint
-@app.get("/v1/endpoints/{endpoint_id}/deployedModels/{deployed_model_id}")
-async def health_check(endpoint_id: str, deployed_model_id: str):
-    """Health check endpoint for Vertex AI"""
-    logger.info(f"Health check request received for endpoint_id: {endpoint_id}, deployed_model_id: {deployed_model_id}")
-    from fastapi.responses import JSONResponse
-    return JSONResponse(
-        status_code=200,
-        content={
-            "state": "READY"
-        }
-    )
-
-# Add AIP-Health endpoint
-@app.get("/health")
+# Add health check endpoint that checks model readiness
+@app.get(os.getenv("AIP_HEALTH_ROUTE", "/health"))
 async def health():
-    """Basic health check endpoint"""
-    return {"status": "healthy"}
+    """Health check endpoint for Vertex AI.
+    Returns:
+        JSONResponse: 200 OK if model is loaded and ready to serve
+        JSONResponse: 503 Service Unavailable if model is not ready
+    """
+    global model, processor
+    
+    try:
+        if model is None or processor is None:
+            logger.warning("Health check failed: Model or processor not initialized")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "unavailable", "reason": "Model not initialized"}
+            )
+            
+        # Check if model is in eval mode and on correct device
+        if not model.training and next(model.parameters()).is_cuda:
+            logger.info("Health check passed: Model ready")
+            return JSONResponse(
+                status_code=200,
+                content={"status": "healthy"}
+            )
+        
+        logger.warning("Health check failed: Model not in proper state")
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unavailable", "reason": "Model not in proper state"}
+        )
+            
+    except Exception as e:
+        logger.error(f"Health check error: {str(e)}", exc_info=True)
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unavailable", "reason": str(e)}
+        )
 
 # Add Vertex AI prediction endpoint
 @app.post("/v1/endpoints/{endpoint_id}/deployedModels/{deployed_model_id}:predict")
