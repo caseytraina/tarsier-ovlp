@@ -17,19 +17,20 @@ from transformers import LlavaForConditionalGeneration
 from models.modeling_tarsier import TarsierForConditionalGeneration, LlavaConfig
 from dataset.processor import Processor
 from contextlib import contextmanager, asynccontextmanager
-from huggingface_hub.constants import DEFAULT_DOWNLOAD_CHUNK_SIZE
+from huggingface_hub import HfApi
 
-# Configure parallel downloads via environment variables
+# Configure parallel downloads
 os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = "1"
-num_workers = max(1, multiprocessing.cpu_count() // 2)  # Half of CPU cores
-os.environ['HF_HUB_DOWNLOAD_WORKERS'] = str(num_workers)
-os.environ['HF_HUB_DOWNLOAD_CHUNK_SIZE'] = str(DEFAULT_DOWNLOAD_CHUNK_SIZE)
+os.environ['HF_HUB_DOWNLOAD_WORKERS'] = str(max(1, multiprocessing.cpu_count() // 2))
 
 app = FastAPI()
 
 # Model initialization
 MODEL_PATH = os.getenv("MODEL_PATH", "omni-research/Tarsier-34b")
 device = "cuda" if torch.cuda.is_available() else "cpu"
+
+# GPU Memory Configuration - 40GB split across 2 GPUs
+max_memory = {0: "40GB", 1: "40GB"}
 
 # Initialize models and processors
 model = None
@@ -79,6 +80,7 @@ def load_model():
             MODEL_PATH,
             config=model_config,
             device_map="auto",
+            max_memory=max_memory,
             torch_dtype=torch.float16,
             trust_remote_code=True
         )
