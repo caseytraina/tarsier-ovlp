@@ -37,8 +37,15 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip3 install --no-cache-dir -r requirements.txt
 
+# Install hf_transfer for faster downloads
+RUN pip install --no-cache-dir hf_transfer
+
 # Install specific version of flash-attention
 RUN pip install flash-attn==2.3.6 --no-build-isolation
+
+# Create cache directory with proper permissions
+RUN mkdir -p /mnt/models/tarsier && \
+    chmod -R 777 /mnt/models/tarsier
 
 # Copy the rest of the application
 COPY . .

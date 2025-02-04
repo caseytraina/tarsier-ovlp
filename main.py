@@ -31,7 +31,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configure parallel downloads
-os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = "1"
+# Disable HF_TRANSFER until we ensure it's installed
+os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = "0"
 os.environ['HF_HUB_DOWNLOAD_WORKERS'] = str(max(1, multiprocessing.cpu_count() // 2))
 
 app = FastAPI()
@@ -92,26 +93,44 @@ def calculate_max_memory() -> Dict[str, str]:
 def load_model():
     global model, processor
     if model is None:
-        print("Loading Tarsier model and processors...")
-        model_config = LlavaConfig.from_pretrained(
-            MODEL_PATH,
-            trust_remote_code=True,
-        )
-        # Set explicit dtype for Flash Attention 2.0
-        dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
-        
-        model = TarsierForConditionalGeneration.from_pretrained(
-            MODEL_PATH,
-            config=model_config,
-            device_map="auto",
-            max_memory=calculate_max_memory(),
-            torch_dtype=dtype,
-            attn_implementation="flash_attention_2",  # New recommended way to enable Flash Attention 2
-            trust_remote_code=True
-        )
-        model.eval()
-        processor = Processor(MODEL_PATH, max_n_frames=8)
-        print(f"Models loaded successfully with dtype: {dtype}")
+        try:
+            print("Loading Tarsier model and processors...")
+            logger.info("Attempting to load model configuration...")
+            
+            # First try to load config
+            try:
+                model_config = LlavaConfig.from_pretrained(
+                    MODEL_PATH,
+                    trust_remote_code=True,
+                    cache_dir="/mnt/models/tarsier"
+                )
+            except Exception as e:
+                logger.error(f"Error loading config: {str(e)}")
+                raise
+                
+            # Set explicit dtype for Flash Attention 2.0
+            dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
+            
+            logger.info("Loading model with configuration...")
+            model = TarsierForConditionalGeneration.from_pretrained(
+                MODEL_PATH,
+                config=model_config,
+                device_map="auto",
+                max_memory=calculate_max_memory(),
+                torch_dtype=dtype,
+                attn_implementation="flash_attention_2",
+                trust_remote_code=True,
+                cache_dir="/mnt/models/tarsier"
+            )
+            model.eval()
+            
+            logger.info("Loading processor...")
+            processor = Processor(MODEL_PATH, max_n_frames=8)
+            logger.info(f"Models loaded successfully with dtype: {dtype}")
+            
+        except Exception as e:
+            logger.error(f"Failed to load model: {str(e)}", exc_info=True)
+            raise
 
 class GenerateRequest(BaseModel):
     instruction: str
