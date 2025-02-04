@@ -16,10 +16,8 @@ from transformers import LlavaForConditionalGeneration
 from models.modeling_tarsier import TarsierForConditionalGeneration, LlavaConfig
 from dataset.processor import Processor
 from contextlib import contextmanager, asynccontextmanager
-from huggingface_hub import set_http_backend
 
-# Configure hub for parallel downloads
-set_http_backend("aiohttp")
+# Configure parallel downloads via environment variables
 os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = "1"
 os.environ['HF_HUB_DOWNLOAD_WORKERS'] = "8"  # Number of parallel downloads
 
