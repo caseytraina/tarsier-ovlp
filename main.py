@@ -9,7 +9,7 @@ import torch
 import requests
 import io
 import tempfile
-from typing import Optional
+from typing import Optional, Dict
 import threading
 import asyncio
 import aiohttp
@@ -20,6 +20,7 @@ from models.modeling_tarsier import TarsierForConditionalGeneration, LlavaConfig
 from dataset.processor import Processor
 from contextlib import contextmanager, asynccontextmanager
 from huggingface_hub import HfApi
+import psutil
 
 # Configure logging
 import logging
@@ -38,9 +39,6 @@ app = FastAPI()
 # Model initialization
 MODEL_PATH = os.getenv("MODEL_PATH", "omni-research/Tarsier-34b")
 device = "cuda" if torch.cuda.is_available() else "cpu"
-
-# GPU Memory Configuration - 40GB split across 2 GPUs
-max_memory = {0: "40GB", 1: "40GB"}
 
 # Initialize models and processors
 model = None
@@ -78,6 +76,19 @@ def temporary_video_file():
             except Exception:
                 pass
 
+def calculate_max_memory() -> Dict[str, str]:
+    # Get number of available GPUs
+    num_gpus = torch.cuda.device_count()
+    
+    # A100 has 40GB or 80GB variants - let's be conservative and reserve some memory
+    # gpu_memory_reserve = "35GB"  # For 40GB A100
+    gpu_memory_reserve = "75GB"  # For 80GB A100
+    
+    # Create memory map for all available GPUs
+    max_memory = {i: gpu_memory_reserve for i in range(num_gpus)}
+    
+    return max_memory
+
 def load_model():
     global model, processor
     if model is None:
@@ -93,7 +104,7 @@ def load_model():
             MODEL_PATH,
             config=model_config,
             device_map="auto",
-            max_memory=max_memory,
+            max_memory=calculate_max_memory(),
             torch_dtype=dtype,
             attn_implementation="flash_attention_2",  # New recommended way to enable Flash Attention 2
             trust_remote_code=True
