@@ -35,8 +35,6 @@ logger = logging.getLogger(__name__)
 os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = "0"
 os.environ['HF_HUB_DOWNLOAD_WORKERS'] = str(max(1, multiprocessing.cpu_count() // 2))
 
-app = FastAPI()
-
 # Model initialization
 MODEL_PATH = os.getenv("MODEL_PATH", "omni-research/Tarsier-34b")
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -51,15 +49,21 @@ executor = ThreadPoolExecutor(max_workers=3)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    print("Loading model on startup...")
-    load_model()
-    yield
-    # Shutdown
-    print("Cleaning up on shutdown...")
-    global model, processor
-    model = None
-    processor = None
+    try:
+        print("Loading model on startup...")
+        load_model()
+        yield
+    except Exception as e:
+        logger.error(f"Error during startup: {str(e)}", exc_info=True)
+        raise
+    finally:
+        # Shutdown
+        print("Cleaning up on shutdown...")
+        global model, processor
+        model = None
+        processor = None
 
+# Create FastAPI app with lifespan
 app = FastAPI(lifespan=lifespan)
 
 @contextmanager
@@ -101,7 +105,6 @@ def load_model():
             try:
                 model_config = LlavaConfig.from_pretrained(
                     MODEL_PATH,
-                    trust_remote_code=True,
                     cache_dir="/mnt/models/tarsier"
                 )
             except Exception as e:
@@ -110,6 +113,7 @@ def load_model():
                 
             # Set explicit dtype for Flash Attention 2.0
             dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
+            logger.info(f"Using dtype: {dtype}")
             
             logger.info("Loading model with configuration...")
             model = TarsierForConditionalGeneration.from_pretrained(
@@ -119,9 +123,13 @@ def load_model():
                 max_memory=calculate_max_memory(),
                 torch_dtype=dtype,
                 attn_implementation="flash_attention_2",
-                trust_remote_code=True,
                 cache_dir="/mnt/models/tarsier"
             )
+            
+            # Tie weights before model goes into eval mode
+            if hasattr(model, 'tie_weights'):
+                model.tie_weights()
+            
             model.eval()
             
             logger.info("Loading processor...")
