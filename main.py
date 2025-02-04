@@ -59,15 +59,22 @@ model_lock = threading.Lock()
 request_semaphore = asyncio.Semaphore(3)
 executor = ThreadPoolExecutor(max_workers=3)
 
+# Add model loading state tracking
+model_loading = True
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
+    global model_loading
     try:
         print("Loading model on startup...")
+        model_loading = True
         load_model()
+        model_loading = False
         yield
     except Exception as e:
         logger.error(f"Error during startup: {str(e)}", exc_info=True)
+        model_loading = False
         raise
     finally:
         # Shutdown
@@ -307,11 +314,20 @@ async def health():
     """Health check endpoint for Vertex AI.
     Returns:
         JSONResponse: 200 OK if model is loaded and ready to serve
-        JSONResponse: 503 Service Unavailable if model is not ready
+        JSONResponse: 503 Service Unavailable if model is not ready or still loading
     """
-    global model, processor
+    global model, processor, model_loading
     
     try:
+        # Check if model is still loading during startup
+        if model_loading:
+            logger.info("Health check: Model is still loading")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "unavailable", "reason": "Model is still loading"}
+            )
+            
+        # Check if model and processor are initialized
         if model is None or processor is None:
             logger.warning("Health check failed: Model or processor not initialized")
             return JSONResponse(
@@ -321,6 +337,19 @@ async def health():
             
         # Check if model is in eval mode and on correct device
         if not model.training and next(model.parameters()).is_cuda:
+            # Additional check: try to get GPU memory info
+            try:
+                gpu_memory = torch.cuda.memory_allocated()
+                if gpu_memory > 0:  # Model is loaded in GPU
+                    logger.info("Health check passed: Model ready and GPU memory allocated")
+                    return JSONResponse(
+                        status_code=200,
+                        content={"status": "healthy", "gpu_memory_allocated": str(gpu_memory)}
+                    )
+            except Exception as e:
+                logger.warning(f"GPU memory check failed: {str(e)}")
+            
+            # Even if GPU memory check fails, if model is on CUDA and in eval mode, we're probably okay
             logger.info("Health check passed: Model ready")
             return JSONResponse(
                 status_code=200,

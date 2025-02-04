@@ -12,6 +12,8 @@ ENV PYTHONUNBUFFERED=1
 ENV CUDA_HOME=/usr/local/cuda
 ENV PATH=${CUDA_HOME}/bin:${PATH}
 ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+ENV AIP_HEALTH_ROUTE=/health
+ENV AIP_HTTP_PORT=8000
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -22,6 +24,7 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     python3-dev \
     ninja-build \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Create model cache directory with proper permissions
@@ -42,6 +45,10 @@ RUN pip install flash-attn==2.3.6 --no-build-isolation
 
 # Copy the rest of the application
 COPY . .
+
+# Add healthcheck
+HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --retries=3 \
+    CMD curl -f http://localhost:${AIP_HTTP_PORT}${AIP_HEALTH_ROUTE} || exit 1
 
 # Expose the port the app runs on
 EXPOSE 8000
