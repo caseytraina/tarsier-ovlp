@@ -280,6 +280,68 @@ async def generate(request: GenerateRequest, background_tasks: BackgroundTasks):
             logger.error(f"Error in generate endpoint: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
+# Add Vertex AI health check endpoints
+@app.get("/v1/endpoints/{endpoint_id}/deployedModels/{deployed_model_id}")
+async def health_check(endpoint_id: str, deployed_model_id: str):
+    return {
+        "endpoint_id": endpoint_id,
+        "deployed_model_id": deployed_model_id,
+        "state": "AVAILABLE"
+    }
+
+# Add Vertex AI prediction endpoint
+@app.post("/v1/endpoints/{endpoint_id}/deployedModels/{deployed_model_id}:predict")
+async def vertex_predict(endpoint_id: str, deployed_model_id: str, request: Request, background_tasks: BackgroundTasks):
+    try:
+        # Parse Vertex AI request format
+        body = await request.json()
+        instances = body.get("instances", [])
+        if not instances or len(instances) == 0:
+            raise HTTPException(status_code=400, detail="No instances provided")
+        
+        # Process first instance (we handle one at a time)
+        instance = instances[0]
+        
+        # Convert Vertex AI format to our format
+        generate_request = GenerateRequest(
+            instruction=instance.get("instruction", ""),
+            video_url=instance.get("video_url"),
+            max_new_tokens=instance.get("max_new_tokens", 512),
+            temperature=instance.get("temperature", 0.0),
+            top_p=instance.get("top_p", 1.0)
+        )
+        
+        # Process using existing generate endpoint logic
+        async with request_semaphore:
+            if generate_request.video_url:
+                with temporary_video_file() as video_path:
+                    await download_video(generate_request.video_url, video_path)
+                    prompt = f"<video>\n{generate_request.instruction}"
+                    response = await asyncio.get_event_loop().run_in_executor(
+                        executor,
+                        process_video,
+                        prompt,
+                        video_path,
+                        generate_request
+                    )
+            else:
+                response = await asyncio.get_event_loop().run_in_executor(
+                    executor,
+                    process_text,
+                    generate_request
+                )
+        
+        # Return in Vertex AI format
+        return {
+            "predictions": [{
+                "response": response.strip()
+            }]
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in Vertex AI prediction endpoint: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info") 
