@@ -24,9 +24,21 @@ import psutil
 
 # Configure logging
 import logging
+import sys
+
+# Create handlers for different log levels
+stdout_handler = logging.StreamHandler(sys.stdout)
+stderr_handler = logging.StreamHandler(sys.stderr)
+
+# Set level filters
+stdout_handler.addFilter(lambda record: record.levelno <= logging.INFO)  # INFO and below go to stdout
+stderr_handler.setLevel(logging.WARNING)  # WARNING and above go to stderr
+
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[stdout_handler, stderr_handler]
 )
 logger = logging.getLogger(__name__)
 
@@ -86,9 +98,9 @@ def calculate_max_memory() -> Dict[str, str]:
     num_gpus = torch.cuda.device_count()
     
     # A100 has 40GB or 80GB variants - let's be conservative and reserve some memory
-    # gpu_memory_reserve = "35GB"  # For 40GB A100
-    gpu_memory_reserve = "75GB"  # For 80GB A100
-    
+    gpu_memory_reserve = "35GB"  # For 40GB A100
+    # gpu_memory_reserve = "75GB"  # For 80GB A100
+    logger.info(f"Calculating max memory for {num_gpus} GPUs with reserve of {gpu_memory_reserve}")
     # Create memory map for all available GPUs
     max_memory = {i: gpu_memory_reserve for i in range(num_gpus)}
     
@@ -297,8 +309,7 @@ async def health_check(endpoint_id: str, deployed_model_id: str):
     return JSONResponse(
         status_code=200,
         content={
-            "state": "AVAILABLE",
-            "deployment_state": "DEPLOYED"
+            "state": "READY"
         }
     )
 
