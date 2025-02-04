@@ -85,7 +85,7 @@ def load_model():
             device_map="auto",
             max_memory=max_memory,
             torch_dtype=dtype,
-            use_flash_attention_2=True,  # Explicitly enable Flash Attention 2.0
+            attn_implementation="flash_attention_2",  # New recommended way to enable Flash Attention 2
             trust_remote_code=True
         )
         model.eval()
