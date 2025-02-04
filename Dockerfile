@@ -4,7 +4,6 @@ FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV MODEL_PATH="omni-research/Tarsier-34b"
 ENV MAX_N_FRAMES=8
-ENV TRANSFORMERS_CACHE=/mnt/models/tarsier
 ENV HF_HOME=/mnt/models/tarsier
 ENV TORCH_HOME=/mnt/models/tarsier
 
@@ -18,8 +17,9 @@ RUN apt-get update && apt-get install -y \
     python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Create model cache directory
-RUN mkdir -p /mnt/models/tarsier && chmod 777 /mnt/models/tarsier
+# Create model cache directory with proper permissions
+RUN mkdir -p /mnt/models/tarsier && \
+    chmod 755 /mnt/models/tarsier
 
 # Set working directory
 WORKDIR /app

@@ -1,7 +1,6 @@
 import os
 # Set cache directory before importing transformers
-os.environ['TRANSFORMERS_CACHE'] = '/mnt/models/tarsier'
-os.environ['HF_HOME'] = '/mnt/models/tarsier'
+os.environ['HF_HOME'] = '/mnt/models/tarsier'  # This is the new recommended way
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
@@ -17,11 +16,10 @@ from transformers import LlavaForConditionalGeneration
 from models.modeling_tarsier import TarsierForConditionalGeneration, LlavaConfig
 from dataset.processor import Processor
 from contextlib import contextmanager
-from huggingface_hub import HfApi, configure_http_backend
-from huggingface_hub.constants import DEFAULT_ETAG_TIMEOUT
+from huggingface_hub import configure_http_backend
 
 # Configure hub for parallel downloads
-configure_http_backend(backend_type="aiohttp")
+configure_http_backend("aiohttp")  # Updated to use correct API
 os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = "1"
 os.environ['HF_HUB_DOWNLOAD_WORKERS'] = "8"  # Number of parallel downloads
 
