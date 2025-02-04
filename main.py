@@ -10,7 +10,7 @@ import torch
 import requests
 import io
 import tempfile
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 import threading
 import asyncio
 import aiohttp
@@ -22,6 +22,7 @@ from dataset.processor import Processor
 from contextlib import contextmanager, asynccontextmanager
 from huggingface_hub import HfApi
 import psutil
+import time
 
 # Configure logging
 import logging
@@ -61,6 +62,35 @@ executor = ThreadPoolExecutor(max_workers=3)
 
 # Add model loading state tracking
 model_loading = True
+
+# Add conversation history management
+class Conversation:
+    def __init__(self, max_history: int = 10):
+        self.messages = []
+        self.max_history = max_history
+        self.last_access = time.time()
+    
+    def add_message(self, role: str, content: str):
+        self.messages.append({"role": role, "content": content})
+        if len(self.messages) > self.max_history:
+            self.messages.pop(0)
+        self.last_access = time.time()
+    
+    def get_context(self) -> str:
+        return "\n".join([f"{msg['role']}: {msg['content']}" for msg in self.messages])
+
+# Global conversation store with cleanup
+conversations: Dict[str, Conversation] = {}
+CONVERSATION_TIMEOUT = 3600  # 1 hour timeout
+
+def cleanup_old_conversations():
+    current_time = time.time()
+    to_remove = []
+    for conv_id, conv in conversations.items():
+        if current_time - conv.last_access > CONVERSATION_TIMEOUT:
+            to_remove.append(conv_id)
+    for conv_id in to_remove:
+        del conversations[conv_id]
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -166,6 +196,7 @@ class GenerateRequest(BaseModel):
     max_new_tokens: Optional[int] = 512
     temperature: Optional[float] = 0.0
     top_p: Optional[float] = 1.0
+    conversation_id: Optional[str] = None  # Add conversation ID
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
@@ -244,12 +275,20 @@ def process_video(prompt: str, video_path: str, request: GenerateRequest):
         raise HTTPException(status_code=500, detail=f"Error processing video: {str(e)}")
 
 def process_text(request: GenerateRequest):
-    """Process text-only request"""
-    with model_lock:  # Ensure exclusive model access
+    """Process text-only request with conversation history"""
+    with model_lock:
         with torch.no_grad():
-            # Pass the instruction directly without 'text' keyword
+            # Get conversation history if available
+            conversation = None
+            if request.conversation_id and request.conversation_id in conversations:
+                conversation = conversations[request.conversation_id]
+                prompt = f"{conversation.get_context()}\nHuman: {request.instruction}\nAssistant:"
+            else:
+                prompt = f"Human: {request.instruction}\nAssistant:"
+
+            # Process with the full conversation context
             inputs = processor(
-                request.instruction,
+                prompt,
                 return_tensors="pt"
             ).to(device)
             
@@ -265,8 +304,15 @@ def process_text(request: GenerateRequest):
                 outputs[0][inputs['input_ids'].shape[1]:],
                 skip_special_tokens=True
             )
-    
-    return response
+            
+            # Update conversation history
+            if request.conversation_id:
+                if request.conversation_id not in conversations:
+                    conversations[request.conversation_id] = Conversation()
+                conversations[request.conversation_id].add_message("Human", request.instruction)
+                conversations[request.conversation_id].add_message("Assistant", response)
+                
+            return response
 
 @app.post("/generate")
 async def generate(request: GenerateRequest, background_tasks: BackgroundTasks):
@@ -374,6 +420,9 @@ async def health():
 @app.post("/v1/endpoints/{endpoint_id}/deployedModels/{deployed_model_id}:predict")
 async def vertex_predict(endpoint_id: str, deployed_model_id: str, request: Request, background_tasks: BackgroundTasks):
     try:
+        # Cleanup old conversations
+        cleanup_old_conversations()
+        
         # Parse Vertex AI request format
         body = await request.json()
         instances = body.get("instances", [])
@@ -389,7 +438,8 @@ async def vertex_predict(endpoint_id: str, deployed_model_id: str, request: Requ
             video_url=instance.get("video_url"),
             max_new_tokens=instance.get("max_new_tokens", 512),
             temperature=instance.get("temperature", 0.0),
-            top_p=instance.get("top_p", 1.0)
+            top_p=instance.get("top_p", 1.0),
+            conversation_id=instance.get("conversation_id")  # Get conversation ID from request
         )
         
         # Process using existing generate endpoint logic
@@ -412,10 +462,11 @@ async def vertex_predict(endpoint_id: str, deployed_model_id: str, request: Requ
                     generate_request
                 )
         
-        # Return in Vertex AI format
+        # Return in Vertex AI format with conversation ID
         return {
             "predictions": [{
-                "response": response.strip()
+                "response": response.strip(),
+                "conversation_id": generate_request.conversation_id
             }]
         }
         
