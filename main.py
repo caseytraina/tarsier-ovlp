@@ -136,8 +136,8 @@ def calculate_max_memory() -> Dict[str, str]:
     num_gpus = torch.cuda.device_count()
     
     # A100 has 40GB or 80GB variants - let's be conservative and reserve some memory
-    gpu_memory_reserve = "35GB"  # For 40GB A100
-    # gpu_memory_reserve = "75GB"  # For 80GB A100
+    # gpu_memory_reserve = "35GB"  # For 40GB A100
+    gpu_memory_reserve = "75GB"  # For 80GB A100
     logger.info(f"Calculating max memory for {num_gpus} GPUs with reserve of {gpu_memory_reserve}")
     # Create memory map for all available GPUs
     max_memory = {i: gpu_memory_reserve for i in range(num_gpus)}
