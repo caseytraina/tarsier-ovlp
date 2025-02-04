@@ -4,13 +4,12 @@ os.environ['HF_HOME'] = '/mnt/models/tarsier'  # This is the new recommended way
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import torch
 import requests
 import io
 import tempfile
-from typing import Optional, Dict
+from typing import Optional
 import threading
 import asyncio
 import aiohttp
@@ -21,36 +20,27 @@ from models.modeling_tarsier import TarsierForConditionalGeneration, LlavaConfig
 from dataset.processor import Processor
 from contextlib import contextmanager, asynccontextmanager
 from huggingface_hub import HfApi
-import psutil
 
 # Configure logging
 import logging
-import sys
-
-# Create handlers for different log levels
-stdout_handler = logging.StreamHandler(sys.stdout)
-stderr_handler = logging.StreamHandler(sys.stderr)
-
-# Set level filters
-stdout_handler.addFilter(lambda record: record.levelno <= logging.INFO)  # INFO and below go to stdout
-stderr_handler.setLevel(logging.WARNING)  # WARNING and above go to stderr
-
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[stdout_handler, stderr_handler]
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 # Configure parallel downloads
-# Disable HF_TRANSFER until we ensure it's installed
-os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = "0"
+os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = "1"
 os.environ['HF_HUB_DOWNLOAD_WORKERS'] = str(max(1, multiprocessing.cpu_count() // 2))
+
+app = FastAPI()
 
 # Model initialization
 MODEL_PATH = os.getenv("MODEL_PATH", "omni-research/Tarsier-34b")
 device = "cuda" if torch.cuda.is_available() else "cpu"
+
+# GPU Memory Configuration - 40GB split across 2 GPUs
+max_memory = {0: "40GB", 1: "40GB"}
 
 # Initialize models and processors
 model = None
@@ -62,21 +52,15 @@ executor = ThreadPoolExecutor(max_workers=3)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    try:
-        print("Loading model on startup...")
-        load_model()
-        yield
-    except Exception as e:
-        logger.error(f"Error during startup: {str(e)}", exc_info=True)
-        raise
-    finally:
-        # Shutdown
-        print("Cleaning up on shutdown...")
-        global model, processor
-        model = None
-        processor = None
+    print("Loading model on startup...")
+    load_model()
+    yield
+    # Shutdown
+    print("Cleaning up on shutdown...")
+    global model, processor
+    model = None
+    processor = None
 
-# Create FastAPI app with lifespan
 app = FastAPI(lifespan=lifespan)
 
 @contextmanager
@@ -94,64 +78,29 @@ def temporary_video_file():
             except Exception:
                 pass
 
-def calculate_max_memory() -> Dict[str, str]:
-    # Get number of available GPUs
-    num_gpus = torch.cuda.device_count()
-    
-    # A100 has 40GB or 80GB variants - let's be conservative and reserve some memory
-    gpu_memory_reserve = "35GB"  # For 40GB A100
-    # gpu_memory_reserve = "75GB"  # For 80GB A100
-    logger.info(f"Calculating max memory for {num_gpus} GPUs with reserve of {gpu_memory_reserve}")
-    # Create memory map for all available GPUs
-    max_memory = {i: gpu_memory_reserve for i in range(num_gpus)}
-    
-    return max_memory
-
 def load_model():
     global model, processor
     if model is None:
-        try:
-            print("Loading Tarsier model and processors...")
-            logger.info("Attempting to load model configuration...")
-            
-            # First try to load config
-            try:
-                model_config = LlavaConfig.from_pretrained(
-                    MODEL_PATH,
-                    cache_dir="/mnt/models/tarsier"
-                )
-            except Exception as e:
-                logger.error(f"Error loading config: {str(e)}")
-                raise
-                
-            # Set explicit dtype for Flash Attention 2.0
-            dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
-            logger.info(f"Using dtype: {dtype}")
-            
-            logger.info("Loading model with configuration...")
-            model = TarsierForConditionalGeneration.from_pretrained(
-                MODEL_PATH,
-                config=model_config,
-                device_map="auto",
-                max_memory=calculate_max_memory(),
-                torch_dtype=dtype,
-                attn_implementation="flash_attention_2",
-                cache_dir="/mnt/models/tarsier"
-            )
-            
-            # Tie weights before model goes into eval mode
-            if hasattr(model, 'tie_weights'):
-                model.tie_weights()
-            
-            model.eval()
-            
-            logger.info("Loading processor...")
-            processor = Processor(MODEL_PATH, max_n_frames=8)
-            logger.info(f"Models loaded successfully with dtype: {dtype}")
-            
-        except Exception as e:
-            logger.error(f"Failed to load model: {str(e)}", exc_info=True)
-            raise
+        print("Loading Tarsier model and processors...")
+        model_config = LlavaConfig.from_pretrained(
+            MODEL_PATH,
+            trust_remote_code=True,
+        )
+        # Set explicit dtype for Flash Attention 2.0
+        dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
+        
+        model = TarsierForConditionalGeneration.from_pretrained(
+            MODEL_PATH,
+            config=model_config,
+            device_map="auto",
+            max_memory=max_memory,
+            torch_dtype=dtype,
+            attn_implementation="flash_attention_2",  # New recommended way to enable Flash Attention 2
+            trust_remote_code=True
+        )
+        model.eval()
+        processor = Processor(MODEL_PATH, max_n_frames=8)
+        print(f"Models loaded successfully with dtype: {dtype}")
 
 class GenerateRequest(BaseModel):
     instruction: str
@@ -301,98 +250,6 @@ async def generate(request: GenerateRequest, background_tasks: BackgroundTasks):
             logger.error(f"Error in generate endpoint: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
-# Add health check endpoint that checks model readiness
-@app.get(os.getenv("AIP_HEALTH_ROUTE", "/health"))
-async def health():
-    """Health check endpoint for Vertex AI.
-    Returns:
-        JSONResponse: 200 OK if model is loaded and ready to serve
-        JSONResponse: 503 Service Unavailable if model is not ready
-    """
-    global model, processor
-    
-    try:
-        if model is None or processor is None:
-            logger.warning("Health check failed: Model or processor not initialized")
-            return JSONResponse(
-                status_code=503,
-                content={"status": "unavailable", "reason": "Model not initialized"}
-            )
-            
-        # Check if model is in eval mode and on correct device
-        if not model.training and next(model.parameters()).is_cuda:
-            logger.info("Health check passed: Model ready")
-            return JSONResponse(
-                status_code=200,
-                content={"status": "healthy"}
-            )
-        
-        logger.warning("Health check failed: Model not in proper state")
-        return JSONResponse(
-            status_code=503,
-            content={"status": "unavailable", "reason": "Model not in proper state"}
-        )
-            
-    except Exception as e:
-        logger.error(f"Health check error: {str(e)}", exc_info=True)
-        return JSONResponse(
-            status_code=503,
-            content={"status": "unavailable", "reason": str(e)}
-        )
-
-# Add Vertex AI prediction endpoint
-@app.post("/v1/endpoints/{endpoint_id}/deployedModels/{deployed_model_id}:predict")
-async def vertex_predict(endpoint_id: str, deployed_model_id: str, request: Request, background_tasks: BackgroundTasks):
-    try:
-        # Parse Vertex AI request format
-        body = await request.json()
-        instances = body.get("instances", [])
-        if not instances or len(instances) == 0:
-            raise HTTPException(status_code=400, detail="No instances provided")
-        
-        # Process first instance (we handle one at a time)
-        instance = instances[0]
-        
-        # Convert Vertex AI format to our format
-        generate_request = GenerateRequest(
-            instruction=instance.get("instruction", ""),
-            video_url=instance.get("video_url"),
-            max_new_tokens=instance.get("max_new_tokens", 512),
-            temperature=instance.get("temperature", 0.0),
-            top_p=instance.get("top_p", 1.0)
-        )
-        
-        # Process using existing generate endpoint logic
-        async with request_semaphore:
-            if generate_request.video_url:
-                with temporary_video_file() as video_path:
-                    await download_video(generate_request.video_url, video_path)
-                    prompt = f"<video>\n{generate_request.instruction}"
-                    response = await asyncio.get_event_loop().run_in_executor(
-                        executor,
-                        process_video,
-                        prompt,
-                        video_path,
-                        generate_request
-                    )
-            else:
-                response = await asyncio.get_event_loop().run_in_executor(
-                    executor,
-                    process_text,
-                    generate_request
-                )
-        
-        # Return in Vertex AI format
-        return {
-            "predictions": [{
-                "response": response.strip()
-            }]
-        }
-        
-    except Exception as e:
-        logger.error(f"Error in Vertex AI prediction endpoint: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info") 

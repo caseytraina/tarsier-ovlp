@@ -12,8 +12,6 @@ ENV PYTHONUNBUFFERED=1
 ENV CUDA_HOME=/usr/local/cuda
 ENV PATH=${CUDA_HOME}/bin:${PATH}
 ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
-ENV AIP_HTTP_PORT=8000
-ENV AIP_HEALTH_ROUTE=/health
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -39,22 +37,14 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# Install hf_transfer for faster downloads
-RUN pip install --no-cache-dir hf_transfer
-
 # Install specific version of flash-attention
 RUN pip install flash-attn==2.3.6 --no-build-isolation
-
-# Create cache directory with proper permissions
-RUN mkdir -p /mnt/models/tarsier && \
-    chmod -R 777 /mnt/models/tarsier
 
 # Copy the rest of the application
 COPY . .
 
 # Expose the port the app runs on
-EXPOSE ${AIP_HTTP_PORT}
+EXPOSE 8000
 
-# Use ENTRYPOINT to ensure the server runs in the foreground
-ENTRYPOINT ["python3", "-m", "uvicorn", "main:app", "--host", "0.0.0.0"]
-CMD ["--port", "8000"] 
+# Command to run the application
+CMD ["python3", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"] 
