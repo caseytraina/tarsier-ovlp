@@ -1,7 +1,7 @@
 import os
 # Set cache directory before importing transformers
-os.environ['TRANSFORMERS_CACHE'] = '/home/caseytraina582/model_cache'
-os.environ['HF_HOME'] = '/home/caseytraina582/model_cache'
+os.environ['TRANSFORMERS_CACHE'] = '/mnt/models/tarsier'
+os.environ['HF_HOME'] = '/mnt/models/tarsier'
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
