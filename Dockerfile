@@ -6,7 +6,7 @@ ENV MODEL_PATH="omni-research/Tarsier-34b"
 ENV MAX_N_FRAMES=8
 ENV HF_HOME=/mnt/models/tarsier
 ENV TORCH_HOME=/mnt/models/tarsier
-ENV HF_HUB_ENABLE_HF_TRANSFER=1
+ENV HF_HUB_ENABLE_HF_TRANSFER=0
 ENV HF_HUB_DOWNLOAD_WORKERS=8
 ENV PYTHONUNBUFFERED=1
 ENV CUDA_HOME=/usr/local/cuda
@@ -40,8 +40,14 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# Install specific version of flash-attention
-RUN pip install flash-attn==2.3.6 --no-build-isolation
+# Install hf_transfer first
+RUN pip install --no-cache-dir hf_transfer
+
+# Then install flash-attention
+RUN pip install --no-cache-dir flash-attn==2.3.6 --no-build-isolation
+
+# Now enable HF transfer after installation
+ENV HF_HUB_ENABLE_HF_TRANSFER=1
 
 # Copy the rest of the application
 COPY . .
