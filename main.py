@@ -51,14 +51,17 @@ os.environ['HF_HUB_DOWNLOAD_WORKERS'] = str(max(1, multiprocessing.cpu_count() /
 
 # Model initialization
 MODEL_PATH = os.getenv("MODEL_PATH", "omni-research/Tarsier-34b")
-device = "cuda" if torch.cuda.is_available() else "cpu"
+NUM_GPUS = torch.cuda.device_count()
+logger.info(f"Found {NUM_GPUS} GPUs")
 
 # Initialize models and processors
-model = None
-processor = None
-model_lock = threading.Lock()
-request_semaphore = asyncio.Semaphore(3)
-executor = ThreadPoolExecutor(max_workers=3)
+models: List[TarsierForConditionalGeneration] = []
+processors: List[Processor] = []
+model_locks = [threading.Lock() for _ in range(NUM_GPUS)]  # One lock per GPU
+model_in_use = [False] * NUM_GPUS  # Track which models are in use
+model_lock = threading.Lock()  # Global lock for model selection
+request_semaphore = asyncio.Semaphore(NUM_GPUS * 3)  # Scale with number of GPUs
+executor = ThreadPoolExecutor(max_workers=NUM_GPUS * 3)  # Scale with number of GPUs
 
 # Add model loading state tracking
 model_loading = True
@@ -92,14 +95,28 @@ def cleanup_old_conversations():
     for conv_id in to_remove:
         del conversations[conv_id]
 
+def get_available_model():
+    """Get the index of an available model, or None if all are in use"""
+    with model_lock:
+        for i in range(len(models)):
+            if not model_in_use[i]:
+                model_in_use[i] = True
+                return i
+        return None
+
+def release_model(index):
+    """Release a model back to the pool"""
+    with model_lock:
+        model_in_use[index] = False
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     global model_loading
     try:
-        print("Loading model on startup...")
+        print("Loading models on startup...")
         model_loading = True
-        load_model()
+        load_models()  # Load multiple models
         model_loading = False
         yield
     except Exception as e:
@@ -109,9 +126,9 @@ async def lifespan(app: FastAPI):
     finally:
         # Shutdown
         print("Cleaning up on shutdown...")
-        global model, processor
-        model = None
-        processor = None
+        global models, processors
+        models = []
+        processors = []
 
 # Create FastAPI app with lifespan
 app = FastAPI(lifespan=lifespan)
@@ -144,50 +161,65 @@ def calculate_max_memory() -> Dict[str, str]:
     
     return max_memory
 
-def load_model():
-    global model, processor
-    if model is None:
+def load_models():
+    """Load one model instance per available GPU"""
+    global models, processors
+    if not models:
         try:
-            print("Loading Tarsier model and processors...")
+            print(f"Loading Tarsier models and processors on {NUM_GPUS} GPUs...")
             logger.info("Attempting to load model configuration...")
             
             # First try to load config
             try:
+                logger.info(f"Loading config from {MODEL_PATH}")
                 model_config = LlavaConfig.from_pretrained(
                     MODEL_PATH,
                     cache_dir="/mnt/models/tarsier"
                 )
+                logger.info("Config loaded successfully")
             except Exception as e:
-                logger.error(f"Error loading config: {str(e)}")
+                logger.error(f"Error loading config: {str(e)}", exc_info=True)
                 raise
                 
             # Set explicit dtype for Flash Attention 2.0
             dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
             logger.info(f"Using dtype: {dtype}")
             
-            logger.info("Loading model with configuration...")
-            model = TarsierForConditionalGeneration.from_pretrained(
-                MODEL_PATH,
-                config=model_config,
-                device_map="auto",
-                max_memory=calculate_max_memory(),
-                torch_dtype=dtype,
-                attn_implementation="flash_attention_2",
-                cache_dir="/mnt/models/tarsier"
-            )
+            # Load model instances
+            for gpu_id in range(NUM_GPUS):
+                logger.info(f"Loading model {gpu_id+1} on GPU {gpu_id}")
+                try:
+                    # Get GPU properties
+                    gpu_name = torch.cuda.get_device_name(gpu_id)
+                    gpu_memory = torch.cuda.get_device_properties(gpu_id).total_memory / (1024**3)  # Convert to GB
+                    logger.info(f"GPU {gpu_id}: {gpu_name} with {gpu_memory:.1f}GB memory")
+                    
+                    # Calculate safe memory limit (leave some headroom)
+                    memory_limit = f"{int(gpu_memory * 0.9)}GB"  # Use 90% of GPU memory
+                    logger.info(f"Setting memory limit to {memory_limit} for GPU {gpu_id}")
+                    
+                    model = TarsierForConditionalGeneration.from_pretrained(
+                        MODEL_PATH,
+                        config=model_config,
+                        device_map={0: f"cuda:{gpu_id}"},  # Explicitly assign to specific GPU
+                        max_memory={gpu_id: memory_limit},  # Set memory limit per GPU
+                        torch_dtype=dtype,
+                        attn_implementation="flash_attention_2",
+                        cache_dir="/mnt/models/tarsier"
+                    )
+                    model.eval()
+                    processor = Processor(MODEL_PATH, max_n_frames=8)
+                    models.append(model)
+                    processors.append(processor)
+                    logger.info(f"Model {gpu_id+1} loaded successfully on GPU {gpu_id}")
+                except Exception as e:
+                    logger.error(f"Error loading model on GPU {gpu_id}: {str(e)}", exc_info=True)
+                    raise
             
-            # Tie weights before model goes into eval mode
-            if hasattr(model, 'tie_weights'):
-                model.tie_weights()
-            
-            model.eval()
-            
-            logger.info("Loading processor...")
-            processor = Processor(MODEL_PATH, max_n_frames=8)
-            logger.info(f"Models loaded successfully with dtype: {dtype}")
+            logger.info(f"Successfully loaded {len(models)} models across {NUM_GPUS} GPUs with dtype: {dtype}")
             
         except Exception as e:
-            logger.error(f"Failed to load model: {str(e)}", exc_info=True)
+            logger.error(f"Failed to load models: {str(e)}", exc_info=True)
             raise
 
 class GenerateRequest(BaseModel):
@@ -239,77 +271,96 @@ async def download_video(url: str, temp_file: str):
         logger.error(f"Error downloading video: {str(e)}", exc_info=True)
         raise HTTPException(status_code=400, detail=f"Failed to download video: {str(e)}")
 
+def process_text(request: GenerateRequest):
+    """Process text-only request with conversation history"""
+    try:
+        model_index = get_available_model()
+        if model_index is None:
+            raise HTTPException(status_code=503, detail="No available models")
+        
+        try:
+            with model_locks[model_index]:
+                with torch.no_grad():
+                    # Get conversation history if available
+                    conversation = None
+                    if request.conversation_id and request.conversation_id in conversations:
+                        conversation = conversations[request.conversation_id]
+                        prompt = f"{conversation.get_context()}\nHuman: {request.instruction}\nAssistant:"
+                    else:
+                        prompt = f"Human: {request.instruction}\nAssistant:"
+
+                    # Process with the full conversation context
+                    inputs = processors[model_index](prompt).to(f"cuda:{model_index}")
+                    
+                    outputs = models[model_index].generate(
+                        **inputs,
+                        do_sample=(request.temperature > 0),
+                        temperature=request.temperature,
+                        max_new_tokens=request.max_new_tokens,
+                        top_p=request.top_p,
+                        use_cache=True
+                    )
+                    response = processors[model_index].tokenizer.decode(
+                        outputs[0][inputs['input_ids'].shape[1]:],
+                        skip_special_tokens=True
+                    )
+                    
+                    # Update conversation history
+                    if request.conversation_id:
+                        if request.conversation_id not in conversations:
+                            conversations[request.conversation_id] = Conversation()
+                        conversations[request.conversation_id].add_message("Human", request.instruction)
+                        conversations[request.conversation_id].add_message("Assistant", response)
+                    
+                    return response
+        finally:
+            release_model(model_index)
+    except Exception as e:
+        logger.error(f"Error in process_text: {str(e)}", exc_info=True)
+        raise
+
 def process_video(prompt: str, video_path: str, request: GenerateRequest):
     """Process video and generate response - CPU/GPU bound operations"""
     try:
         logger.info(f"Processing video from {video_path} with prompt: {prompt}")
-        with model_lock:  # Ensure exclusive model access
-            logger.info("Processing video with model...")
-            inputs = processor(prompt, video_path, edit_prompt=True)
-            logger.info("Video processed by processor")
-            
-            inputs = {k: v.to(device) for k, v in inputs.items() if v is not None}
-            logger.info("Inputs moved to device")
-            
-            with torch.no_grad():
-                logger.info("Generating response...")
-                outputs = model.generate(
-                    **inputs,
-                    do_sample=(request.temperature > 0),
-                    temperature=request.temperature,
-                    max_new_tokens=request.max_new_tokens,
-                    top_p=request.top_p,
-                    use_cache=True
-                )
-                logger.info("Response generated")
-                
-                response = processor.tokenizer.decode(
-                    outputs[0][inputs['input_ids'][0].shape[0]:],
-                    skip_special_tokens=True
-                )
-                logger.info("Response decoded")
+        model_index = get_available_model()
+        if model_index is None:
+            raise HTTPException(status_code=503, detail="No available models")
         
-        return response
+        try:
+            with model_locks[model_index]:
+                logger.info(f"Processing video with model {model_index}...")
+                inputs = processors[model_index](prompt, video_path, edit_prompt=True)
+                logger.info("Video processed by processor")
+                
+                inputs = {k: v.to(f"cuda:{model_index}") for k, v in inputs.items() if v is not None}
+                logger.info("Inputs moved to device")
+                
+                with torch.no_grad():
+                    logger.info("Generating response...")
+                    outputs = models[model_index].generate(
+                        **inputs,
+                        do_sample=(request.temperature > 0),
+                        temperature=request.temperature,
+                        max_new_tokens=request.max_new_tokens,
+                        top_p=request.top_p,
+                        use_cache=True
+                    )
+                    logger.info("Response generated")
+                    
+                    response = processors[model_index].tokenizer.decode(
+                        outputs[0][inputs['input_ids'][0].shape[0]:],
+                        skip_special_tokens=True
+                    )
+                    logger.info("Response decoded")
+            
+            return response
+        finally:
+            release_model(model_index)
+            
     except Exception as e:
         logger.error(f"Error processing video: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error processing video: {str(e)}")
-
-def process_text(request: GenerateRequest):
-    """Process text-only request with conversation history"""
-    with model_lock:
-        with torch.no_grad():
-            # Get conversation history if available
-            conversation = None
-            if request.conversation_id and request.conversation_id in conversations:
-                conversation = conversations[request.conversation_id]
-                prompt = f"{conversation.get_context()}\nHuman: {request.instruction}\nAssistant:"
-            else:
-                prompt = f"Human: {request.instruction}\nAssistant:"
-
-            # Process with the full conversation context
-            inputs = processor(prompt).to(device)
-            
-            outputs = model.generate(
-                **inputs,
-                do_sample=(request.temperature > 0),
-                temperature=request.temperature,
-                max_new_tokens=request.max_new_tokens,
-                top_p=request.top_p,
-                use_cache=True
-            )
-            response = processor.tokenizer.decode(
-                outputs[0][inputs['input_ids'].shape[1]:],
-                skip_special_tokens=True
-            )
-            
-            # Update conversation history
-            if request.conversation_id:
-                if request.conversation_id not in conversations:
-                    conversations[request.conversation_id] = Conversation()
-                conversations[request.conversation_id].add_message("Human", request.instruction)
-                conversations[request.conversation_id].add_message("Assistant", response)
-                
-            return response
 
 @app.post("/generate")
 async def generate(request: GenerateRequest, background_tasks: BackgroundTasks):
@@ -360,7 +411,7 @@ async def health():
         JSONResponse: 200 OK if model is loaded and ready to serve
         JSONResponse: 503 Service Unavailable if model is not ready or still loading
     """
-    global model, processor, model_loading
+    global models, processors, model_loading
     
     try:
         # Check if model is still loading during startup
@@ -372,38 +423,39 @@ async def health():
             )
             
         # Check if model and processor are initialized
-        if model is None or processor is None:
+        if not models or not processors:
             logger.warning("Health check failed: Model or processor not initialized")
             return JSONResponse(
                 status_code=503,
                 content={"status": "unavailable", "reason": "Model not initialized"}
             )
             
-        # Check if model is in eval mode and on correct device
-        if not model.training and next(model.parameters()).is_cuda:
-            # Additional check: try to get GPU memory info
-            try:
-                gpu_memory = torch.cuda.memory_allocated()
-                if gpu_memory > 0:  # Model is loaded in GPU
-                    logger.info("Health check passed: Model ready and GPU memory allocated")
-                    return JSONResponse(
-                        status_code=200,
-                        content={"status": "healthy", "gpu_memory_allocated": str(gpu_memory)}
-                    )
-            except Exception as e:
-                logger.warning(f"GPU memory check failed: {str(e)}")
+        # Check if models are in eval mode and on correct device
+        for model, processor in zip(models, processors):
+            if not model.training and next(model.parameters()).is_cuda:
+                # Additional check: try to get GPU memory info
+                try:
+                    gpu_memory = torch.cuda.memory_allocated()
+                    if gpu_memory > 0:  # Model is loaded in GPU
+                        logger.info(f"Health check passed: Model {models.index(model)+1} ready and GPU memory allocated")
+                        return JSONResponse(
+                            status_code=200,
+                            content={"status": "healthy", "gpu_memory_allocated": str(gpu_memory)}
+                        )
+                except Exception as e:
+                    logger.warning(f"GPU memory check failed for model {models.index(model)+1}: {str(e)}")
             
             # Even if GPU memory check fails, if model is on CUDA and in eval mode, we're probably okay
-            logger.info("Health check passed: Model ready")
+            logger.info(f"Health check passed: Model {models.index(model)+1} ready")
             return JSONResponse(
                 status_code=200,
                 content={"status": "healthy"}
             )
         
-        logger.warning("Health check failed: Model not in proper state")
+        logger.warning("Health check failed: Models not in proper state")
         return JSONResponse(
             status_code=503,
-            content={"status": "unavailable", "reason": "Model not in proper state"}
+            content={"status": "unavailable", "reason": "Models not in proper state"}
         )
             
     except Exception as e:
