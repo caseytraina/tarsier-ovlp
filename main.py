@@ -199,34 +199,38 @@ def load_models():
                     memory_limit = f"{int(gpu_memory * 0.9)}GB"  # Use 90% of GPU memory
                     logger.info(f"Setting memory limit to {memory_limit} for GPU {gpu_id}")
                     
-                    # Create device map for this GPU
-                    device_map = {"": f"cuda:{gpu_id}"}  # Map all modules to this GPU
+                    # Set current device before loading
+                    torch.cuda.set_device(gpu_id)
                     
+                    # Load model directly to GPU
                     model = TarsierForConditionalGeneration.from_pretrained(
                         MODEL_PATH,
                         config=model_config,
-                        device_map=device_map,
                         torch_dtype=dtype,
-                        attn_implementation="flash_attention_2",
+                        device_map=None,  # Disable automatic device mapping
+                        use_flash_attention_2=True,  # Use this instead of attn_implementation
                         cache_dir="/mnt/models/tarsier",
                         trust_remote_code=True,
-                        low_cpu_mem_usage=True
-                    )
+                        low_cpu_mem_usage=True,
+                        use_safetensors=True,
+                        offload_folder=None,  # Disable offloading
+                        offload_state_dict=False  # Disable state dict offloading
+                    ).to(f"cuda:{gpu_id}")  # Move entire model to GPU immediately
                     
-                    # Ensure model is on correct device
-                    model = model.to(f"cuda:{gpu_id}")
+                    # Force model to eval mode
                     model.eval()
                     
+                    # Initialize processor
                     processor = Processor(MODEL_PATH, max_n_frames=8)
+                    
+                    # Verify all parameters are on correct device
+                    for param in model.parameters():
+                        if param.device != torch.device(f"cuda:{gpu_id}"):
+                            param.data = param.data.to(f"cuda:{gpu_id}")
+                    
                     models.append(model)
                     processors.append(processor)
                     logger.info(f"Model {gpu_id+1} loaded successfully on GPU {gpu_id}")
-                    
-                    # Verify model device placement
-                    for name, param in model.named_parameters():
-                        if param.device != torch.device(f"cuda:{gpu_id}"):
-                            logger.warning(f"Parameter {name} is on {param.device} instead of cuda:{gpu_id}")
-                            param.data = param.data.to(f"cuda:{gpu_id}")
                     
                 except Exception as e:
                     logger.error(f"Error loading model on GPU {gpu_id}: {str(e)}", exc_info=True)
