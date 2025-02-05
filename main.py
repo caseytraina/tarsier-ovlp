@@ -174,7 +174,8 @@ def load_models():
                 logger.info(f"Loading config from {MODEL_PATH}")
                 model_config = LlavaConfig.from_pretrained(
                     MODEL_PATH,
-                    cache_dir="/mnt/models/tarsier"
+                    cache_dir="/mnt/models/tarsier",
+                    trust_remote_code=True
                 )
                 logger.info("Config loaded successfully")
             except Exception as e:
@@ -198,20 +199,35 @@ def load_models():
                     memory_limit = f"{int(gpu_memory * 0.9)}GB"  # Use 90% of GPU memory
                     logger.info(f"Setting memory limit to {memory_limit} for GPU {gpu_id}")
                     
+                    # Create device map for this GPU
+                    device_map = {"": f"cuda:{gpu_id}"}  # Map all modules to this GPU
+                    
                     model = TarsierForConditionalGeneration.from_pretrained(
                         MODEL_PATH,
                         config=model_config,
-                        device_map={0: f"cuda:{gpu_id}"},  # Explicitly assign to specific GPU
-                        max_memory={gpu_id: memory_limit},  # Set memory limit per GPU
+                        device_map=device_map,
                         torch_dtype=dtype,
                         attn_implementation="flash_attention_2",
-                        cache_dir="/mnt/models/tarsier"
+                        cache_dir="/mnt/models/tarsier",
+                        trust_remote_code=True,
+                        low_cpu_mem_usage=True
                     )
+                    
+                    # Ensure model is on correct device
+                    model = model.to(f"cuda:{gpu_id}")
                     model.eval()
+                    
                     processor = Processor(MODEL_PATH, max_n_frames=8)
                     models.append(model)
                     processors.append(processor)
                     logger.info(f"Model {gpu_id+1} loaded successfully on GPU {gpu_id}")
+                    
+                    # Verify model device placement
+                    for name, param in model.named_parameters():
+                        if param.device != torch.device(f"cuda:{gpu_id}"):
+                            logger.warning(f"Parameter {name} is on {param.device} instead of cuda:{gpu_id}")
+                            param.data = param.data.to(f"cuda:{gpu_id}")
+                    
                 except Exception as e:
                     logger.error(f"Error loading model on GPU {gpu_id}: {str(e)}", exc_info=True)
                     raise
