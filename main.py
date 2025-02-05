@@ -287,10 +287,7 @@ def process_text(request: GenerateRequest):
                 prompt = f"Human: {request.instruction}\nAssistant:"
 
             # Process with the full conversation context
-            inputs = processor(
-                prompt,
-                return_tensors="pt"
-            ).to(device)
+            inputs = processor(prompt).to(device)
             
             outputs = model.generate(
                 **inputs,
